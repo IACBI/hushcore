@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sounddevice
+numpy
+scipy
+websockets
+# Optional for DeepFilterNet support:
+# torch
+# torchaudio
+# deepfilternet

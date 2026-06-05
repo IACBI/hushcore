@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HUSHCORE | Local Real-Time Mic Enhancement</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Ambient Glowing Background Orbs (GPU friendly radial gradients) -->
+    <div class="glow-orb orb-purple"></div>
+    <div class="glow-orb orb-cyan"></div>
+    
+    <div class="app-container mode-simple" id="app-wrapper">
+        <!-- TOP NAVBAR -->
+        <header class="app-header">
+            <div class="logo-area">
+                <h1>HUSH<span>CORE</span></h1>
+                <span class="tagline">Local Mic Processor</span>
+            </div>
+            
+            <div class="status-panel">
+                <!-- Dashboard View Switcher -->
+                <div class="view-mode-container">
+                    <span class="view-mode-label">VIEW:</span>
+                    <div class="view-mode-selector">
+                        <button id="view-mode-simple" class="view-btn active">EASY</button>
+                        <button id="view-mode-adv" class="view-btn">ADVANCED</button>
+                    </div>
+                </div>
+                
+                <!-- Engine States -->
+                <div class="status-item">
+                    <span class="status-label">ENGINE:</span>
+                    <span id="engine-status" class="status-value status-stopped">STOPPED</span>
+                </div>
+                
+                <div class="status-item">
+                    <span class="status-label">AI ENGINE:</span>
+                    <span id="ai-status" class="status-value status-unavailable">UNAVAILABLE</span>
+                </div>
+                
+                <button id="power-btn" class="power-button">
+                    ⚡ START ENGINE
+                </button>
+            </div>
+        </header>
+
+        <!-- MAIN DASHBOARD CONTENT -->
+        <main class="dashboard-grid">
+            
+            <!-- LEFT COLUMN: ROUTING, METERS & GAINS -->
+            <section class="dash-column">
+                <!-- AUDIO ROUTING CARD -->
+                <div class="glass-card">
+                    <div class="card-header">
+                        <h2>Audio Routing</h2>
+                        <span class="icon">🔄</span>
+                    </div>
+                    <div class="card-content">
+                        <div class="control-group">
+                            <label for="input-device-select">Microphone (Input Device)</label>
+                            <div class="select-wrapper">
+                                <select id="input-device-select" class="glow-select">
+                                    <option value="">Detecting inputs...</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="output-device-select">Broadcast Output (Virtual Cable)</label>
+                            <div class="select-wrapper">
+                                <select id="output-device-select" class="glow-select">
+                                    <option value="">Detecting outputs...</option>
+                                </select>
+                            </div>
+                            <span class="cable-tip">Tip: Route to "CABLE Input (VB-Audio Virtual Cable)"</span>
+                        </div>
+                        
+                        <!-- Routing Warning Banner -->
+                        <div id="routing-tip-box" class="warning-banner warning">
+                            Checking audio routing status...
+                        </div>
+                        
+                        <div class="divider"></div>
+                        
+                        <!-- Monitor Toggle -->
+                        <div class="control-group">
+                            <div class="toggle-container">
+                                <label class="switch">
+                                    <input type="checkbox" id="monitor-enabled-checkbox">
+                                    <span class="slider round"></span>
+                                </label>
+                                <span class="toggle-label">Hear Myself (Monitor)</span>
+                            </div>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="monitor-device-select">Monitor Output Device</label>
+                            <div class="select-wrapper">
+                                <select id="monitor-device-select" class="glow-select" disabled>
+                                    <option value="">Select Headphones...</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SIGNAL LEVELS CARD -->
+                <div class="glass-card">
+                    <div class="card-header">
+                        <h2>Signal Levels</h2>
+                        <span class="icon">📊</span>
+                    </div>
+                    <div class="card-content">
+                        <!-- Input Gain & Level -->
+                        <div class="slider-group">
+                            <div class="slider-header">
+                                <label for="input-gain-slider">Input Gain</label>
+                                <span id="input-gain-val" class="slider-val">1.00x</span>
+                            </div>
+                            <input type="range" id="input-gain-slider" min="0" max="3" step="0.05" value="1.0">
+                        </div>
+                        
+                        <div class="meter-container">
+                            <span class="meter-label">INPUT LEVEL</span>
+                            <div class="meter-track">
+                                <div id="input-meter-fill" class="meter-fill input-fill"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="divider" style="margin: 10px 0;"></div>
+                        
+                        <!-- Output Gain & Level -->
+                        <div class="meter-container">
+                            <span class="meter-label">OUTPUT LEVEL</span>
+                            <div class="meter-track">
+                                <div id="output-meter-fill" class="meter-fill output-fill"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-group" style="margin-top: 10px;">
+                            <div class="slider-header">
+                                <label for="output-gain-slider">Output Gain</label>
+                                <span id="output-gain-val" class="slider-val">1.00x</span>
+                            </div>
+                            <input type="range" id="output-gain-slider" min="0" max="3" step="0.05" value="1.0">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- RIGHT COLUMN: MONITOR & EFFECTS -->
+            <section class="dash-column">
+                
+                <!-- REAL-TIME MONITOR (VISUALIZER) -->
+                <div class="glass-card card-visualizer">
+                    <div class="card-header">
+                        <h2>Real-Time Monitor</h2>
+                        <div class="visualizer-tabs">
+                            <button id="viz-tab-spec" class="tab-btn active">SPECTRUM</button>
+                            <button id="viz-tab-wave" class="tab-btn">WAVEFORM</button>
+                        </div>
+                    </div>
+                    <div class="viz-body">
+                        <div class="canvas-container">
+                            <canvas id="visualizer-canvas"></canvas>
+                        </div>
+                        <div class="viz-footer">
+                            <div class="gate-led-indicator">
+                                <span id="gate-led" class="led led-closed"></span>
+                                <span class="led-label">NOISE GATE STATE: <span id="gate-text">MUTED</span></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EASY MODE presets card (SIMPLE ONLY) -->
+                <div class="glass-card simple-only">
+                    <div class="card-header">
+                        <h2>Quick Presets</h2>
+                        <span class="icon">✨</span>
+                    </div>
+                    <div class="card-content">
+                        <div class="presets-grid">
+                            <button id="preset-btn-off" class="preset-btn active">
+                                <span class="preset-icon">🔇</span>
+                                <div class="preset-info">
+                                    <h3 class="preset-title">Bypass</h3>
+                                    <p class="preset-desc">Disable processing</p>
+                                </div>
+                            </button>
+                            <button id="preset-btn-voice" class="preset-btn">
+                                <span class="preset-icon">🗣️</span>
+                                <div class="preset-info">
+                                    <h3 class="preset-title">Temiz Ses</h3>
+                                    <p class="preset-desc">Natural noise reduction</p>
+                                </div>
+                            </button>
+                            <button id="preset-btn-gaming" class="preset-btn">
+                                <span class="preset-icon">🎮</span>
+                                <div class="preset-info">
+                                    <h3 class="preset-title">Oyuncu</h3>
+                                    <p class="preset-desc">Filters key clicks</p>
+                                </div>
+                            </button>
+                            <button id="preset-btn-broadcaster" class="preset-btn">
+                                <span class="preset-icon">🎙️</span>
+                                <div class="preset-info">
+                                    <h3 class="preset-title">Yayıncı</h3>
+                                    <p class="preset-desc">Broadcast voice tone</p>
+                                </div>
+                            </button>
+                        </div>
+                        
+                        <div class="divider"></div>
+                        
+                        <div class="easy-controls">
+                            <div class="slider-group">
+                                <div class="slider-header">
+                                    <label for="easy-ns-slider">Gürültü Engelleme (Noise Reduction)</label>
+                                    <span id="easy-ns-val" class="slider-val">80%</span>
+                                </div>
+                                <input type="range" id="easy-ns-slider" min="0" max="100" step="5" value="80">
+                            </div>
+                            
+                            <div class="slider-group">
+                                <div class="slider-header">
+                                    <label for="easy-tone-slider">Ses Tonu Karakteri (Voice Tone)</label>
+                                    <span id="easy-tone-val" class="slider-val">Doğal (Natural)</span>
+                                </div>
+                                <input type="range" id="easy-tone-slider" min="0" max="2" step="1" value="1">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STUDIO FX RACK (ADVANCED ONLY) -->
+                <div class="glass-card adv-only">
+                    <div class="card-header">
+                        <h2>Studio FX Rack</h2>
+                        <div class="visualizer-tabs" id="fx-tabs">
+                            <button class="tab-btn active" data-target="tab-ns">AI NOISE CANCEL</button>
+                            <button class="tab-btn" data-target="tab-gate">GATE</button>
+                            <button class="tab-btn" data-target="tab-eq">EQ</button>
+                            <button class="tab-btn" data-target="tab-comp">COMP</button>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <!-- TAB: NOISE CANCEL -->
+                        <div id="tab-ns" class="tab-panel active">
+                            <div class="control-group">
+                                <label>Noise Suppression Mode</label>
+                                <div class="mode-selector">
+                                    <button id="ns-mode-off" class="mode-btn">OFF</button>
+                                    <button id="ns-mode-eco" class="mode-btn active">ECO DSP</button>
+                                    <button id="ns-mode-high" class="mode-btn">HQ AI</button>
+                                </div>
+                            </div>
+                            
+                            <div id="df-availability-info" class="info-bubble" style="margin-top: 10px;">
+                                Eco DSP: Lightweight spectral noise reduction.
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="ns-strength-slider">Suppression Strength</label>
+                                    <span id="ns-strength-val" class="slider-val">80%</span>
+                                </div>
+                                <input type="range" id="ns-strength-slider" min="0" max="100" step="5" value="80">
+                            </div>
+                        </div>
+
+                        <!-- TAB: NOISE GATE -->
+                        <div id="tab-gate" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="gate-enabled-checkbox" checked>
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable Noise Gate</span>
+                                </div>
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="gate-thresh-slider">Mute Threshold</label>
+                                    <span id="gate-thresh-val" class="slider-val">-45 dB</span>
+                                </div>
+                                <input type="range" id="gate-thresh-slider" min="-80" max="-10" step="1" value="-45">
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="gate-release-slider">Release Time</label>
+                                    <span id="gate-release-val" class="slider-val">150 ms</span>
+                                </div>
+                                <input type="range" id="gate-release-slider" min="50" max="500" step="10" value="150">
+                            </div>
+                        </div>
+
+                        <!-- TAB: EQUALIZER -->
+                        <div id="tab-eq" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="eq-enabled-checkbox" checked>
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable 3-Band EQ</span>
+                                </div>
+                            </div>
+                            
+                            <div class="eq-sliders" style="margin-top: 15px;">
+                                <div class="eq-slider-group">
+                                    <span id="eq-low-val" class="eq-val">0.0 dB</span>
+                                    <input type="range" id="eq-low-slider" min="-12" max="12" step="0.5" value="0.0">
+                                    <span class="eq-label">BASS</span>
+                                </div>
+                                <div class="eq-slider-group">
+                                    <span id="eq-mid-val" class="eq-val">0.0 dB</span>
+                                    <input type="range" id="eq-mid-slider" min="-12" max="12" step="0.5" value="0.0">
+                                    <span class="eq-label">MIDS</span>
+                                </div>
+                                <div class="eq-slider-group">
+                                    <span id="eq-high-val" class="eq-val">0.0 dB</span>
+                                    <input type="range" id="eq-high-slider" min="-12" max="12" step="0.5" value="0.0">
+                                    <span class="eq-label">TREBLE</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- TAB: COMPRESSOR -->
+                        <div id="tab-comp" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="compressor-enabled-checkbox" checked>
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable Compressor</span>
+                                </div>
+                            </div>
+                            
+                            <div class="grid-2-col" style="margin-top: 15px;">
+                                <div class="slider-group">
+                                    <div class="slider-header">
+                                        <label for="comp-thresh-slider">Threshold</label>
+                                        <span id="comp-thresh-val" class="slider-val">-18 dB</span>
+                                    </div>
+                                    <input type="range" id="comp-thresh-slider" min="-60" max="0" step="1" value="-18">
+                                </div>
+                                
+                                <div class="slider-group">
+                                    <div class="slider-header">
+                                        <label for="comp-ratio-slider">Ratio</label>
+                                        <span id="comp-ratio-val" class="slider-val">3.0:1</span>
+                                    </div>
+                                    <input type="range" id="comp-ratio-slider" min="1.0" max="10.0" step="0.5" value="3.0">
+                                </div>
+                                
+                                <div class="slider-group" style="margin-top: 10px;">
+                                    <div class="slider-header">
+                                        <label for="comp-attack-slider">Attack</label>
+                                        <span id="comp-attack-val" class="slider-val">10 ms</span>
+                                    </div>
+                                    <input type="range" id="comp-attack-slider" min="1" max="50" step="1" value="10">
+                                </div>
+                                
+                                <div class="slider-group" style="margin-top: 10px;">
+                                    <div class="slider-header">
+                                        <label for="comp-release-slider">Release</label>
+                                        <span id="comp-release-val" class="slider-val">100 ms</span>
+                                    </div>
+                                    <input type="range" id="comp-release-slider" min="10" max="500" step="10" value="100">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+        
+        <!-- FOOTER -->
+        <footer class="app-footer">
+            <p>HUSHCORE &copy; 2026 Local Latency-Compensated Audio Engine</p>
+            <div id="connection-indicator" class="connection-status disconnected">
+                DISCONNECTED
+            </div>
+        </footer>
+    </div>
+    
+    <script type="module" src="app.js"></script>
+</body>
+</html>
