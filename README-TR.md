@@ -16,6 +16,8 @@ HushCore, mikrofondan gelen sesinizi gerçek zamanlı olarak iyileştiren, gizli
     *   *Noise Gate (Gürültü Kapısı)*: Konuşmadığınızda arka plan seslerini ve mekanik klavye tıkırtılarını keser.
     *   *3-Bant Parametrik EQ*: Sesinizin sıcaklığını (Bass), netliğini (Mids) ve tiz netliğini (Treble) şekillendirir.
     *   *Kompresör*: Ses seviyesi dalgalanmalarını dengeleyerek çok kısık veya çok yüksek patlayan sesleri eşitler.
+    *   *Dinamik De-Esser*: Tıslayıcı "S", "Z" ve "T" seslerini dinamik olarak baskılayarak sertliği giderir.
+    *   *Vokal Exciter (Harmonik Uyarım)*: Sese sıcak harmonikler ekleyerek profesyonel radyo parlaklığı ve tını netliği ("hava") kazandırır.
     *   *Limitleyici (Limiter)*: Dijital patlamaları ve ses bozulmalarını önler (>0 dBFS).
 *   **Gecikmesiz Canlı Metreler**: forced reflow (tarayıcı düzen yükü) oluşturmayan, GPU hızlandırmalı CSS dönüşümleri sayesinde 60fps akıcı arayüz.
 *   **Yönlendirme Uyarısı Paneli**: Çıkış doğrudan hoparlöre verildiğinde (kendi sesinizi duyup yankı yapmaması için) arayüzde anlık uyarılar gösterir.

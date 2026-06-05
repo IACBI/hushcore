@@ -16,6 +16,8 @@ HushCore is a local, privacy-first, low-latency audio processing application des
     *   *Noise Gate*: Shuts down background static and key clicks when you are silent.
     *   *3-Band Parametric EQ*: Shape your voice warmth (Bass), clarity (Mids), and presence (Treble).
     *   *Dynamics Compressor*: Evens out vocal dynamics so you never sound too quiet or clip.
+    *   *Dynamic De-Esser*: Attenuates harsh sibilant "S" and "T" sounds dynamically when sibilance spikes.
+    *   *Harmonic Vocal Exciter*: Infuses warm odd-harmonics (`tanh` drive) to add professional sparkling brightness ("air") and clarity.
     *   *Peak Limiter*: Hard limiter protecting against digital clipping (>0 dBFS).
 *   **Reflow-Free Level Meters**: Highly optimized web interface using GPU accelerated CSS transformations to achieve smooth 60fps rendering without UI lag.
 *   **Routing Status Alert Banner**: Live UI warnings when outputting directly to physical speakers (feedback loops) vs routing successfully to Virtual Cable.
