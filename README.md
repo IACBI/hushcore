@@ -19,6 +19,12 @@ HushCore is a local, privacy-first, low-latency audio processing application des
     *   *Dynamic De-Esser*: Attenuates harsh sibilant "S" and "T" sounds dynamically when sibilance spikes.
     *   *Harmonic Vocal Exciter*: Infuses warm odd-harmonics (`tanh` drive) to add professional sparkling brightness ("air") and clarity.
     *   *Peak Limiter*: Hard limiter protecting against digital clipping (>0 dBFS).
+*   **Premium Feature Suite**:
+    *   *VST3 Host*: Dynamically load any third-party `.vst3` audio plugin. Opens the native plugin GUI editor directly on your desktop from the web panel.
+    *   *Manual Latency Tuning*: Set specific buffer sizes (64, 128, 256, 512 samples) to manually configure stream stability and latency.
+    *   *3D Cascade Visualizer*: An offline, 60fps isometric waterfall spectrum display cascading backward in time with cyberpunk styling.
+    *   *System Tray Launcher*: Minimizes to the Windows system tray with options to toggle the audio engine, open the dashboard, or exit.
+    *   *Dynamic API Key Security*: Protects against unauthorized network access with startup token generation and request validation.
 *   **Reflow-Free Level Meters**: Highly optimized web interface using GPU accelerated CSS transformations to achieve smooth 60fps rendering without UI lag.
 *   **Routing Status Alert Banner**: Live UI warnings when outputting directly to physical speakers (feedback loops) vs routing successfully to Virtual Cable.
 

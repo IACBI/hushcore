@@ -19,6 +19,12 @@ HushCore, mikrofondan gelen sesinizi gerçek zamanlı olarak iyileştiren, gizli
     *   *Dinamik De-Esser*: Tıslayıcı "S", "Z" ve "T" seslerini dinamik olarak baskılayarak sertliği giderir.
     *   *Vokal Exciter (Harmonik Uyarım)*: Sese sıcak harmonikler ekleyerek profesyonel radyo parlaklığı ve tını netliği ("hava") kazandırır.
     *   *Limitleyici (Limiter)*: Dijital patlamaları ve ses bozulmalarını önler (>0 dBFS).
+*   **Premium Özellik Paketi**:
+    *   *VST3 Sunucusu*: Herhangi bir üçüncü taraf `.vst3` ses eklentisini dinamik olarak yükleyin. Eklentinin kendi orijinal grafik arayüzünü doğrudan web panelinden açın.
+    *   *Manuel Gecikme Ayarı*: Ses tampon boyutlarını (64, 128, 256, 512 örnek) seçerek gecikme kararlılığını kendiniz yapılandırın.
+    *   *3D Cascade Spektrogram*: Cyberpunk tarzında, zamana bağlı geriye doğru izometrik şelale biçiminde akan akıcı 60 FPS ses göstergesi.
+    *   *Sistem Tepsisi Başlatıcısı*: Windows görev çubuğu tepsisine (System Tray) küçülerek arka planda sessizce çalışır; ses motorunu başlatıp kapatabilir.
+    *   *Dinamik API Güvenliği*: Yetkisiz ağ erişimlerini engellemek için her açılışta rastgele şifreli anahtar üretip REST/WebSocket isteklerini doğrular.
 *   **Gecikmesiz Canlı Metreler**: forced reflow (tarayıcı düzen yükü) oluşturmayan, GPU hızlandırmalı CSS dönüşümleri sayesinde 60fps akıcı arayüz.
 *   **Yönlendirme Uyarısı Paneli**: Çıkış doğrudan hoparlöre verildiğinde (kendi sesinizi duyup yankı yapmaması için) arayüzde anlık uyarılar gösterir.
 
