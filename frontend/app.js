@@ -44,6 +44,7 @@ const dom = {
     outputGainSlider: document.getElementById('output-gain-slider'),
     outputGainVal: document.getElementById('output-gain-val'),
     inputMeterFill: document.getElementById('input-meter-fill'),
+    gateMarker: document.getElementById('gate-threshold-marker'),
     outputMeterFill: document.getElementById('output-meter-fill'),
     
     // Canvas Visualizer
@@ -204,6 +205,17 @@ Ses sanal hatta gönderiliyor. Discord/OBS ses girişi ayarlarından <strong>VB-
     }
 }
 
+function updateGateMarkerPosition(threshDb) {
+    if (!dom.gateMarker) return;
+    if (!settings.gate_enabled) {
+        dom.gateMarker.style.display = 'none';
+        return;
+    }
+    dom.gateMarker.style.display = 'block';
+    const pct = dbToPercent(threshDb);
+    dom.gateMarker.style.left = `${pct}%`;
+}
+
 // Update the UI fields with current settings values
 function applySettingsToUI(cfg) {
     // Monitor Checkbox & Device Select state
@@ -229,6 +241,7 @@ function applySettingsToUI(cfg) {
     dom.gateThreshVal.textContent = `${cfg.gate_threshold_db} dB`;
     dom.gateReleaseSlider.value = cfg.gate_release_ms;
     dom.gateReleaseVal.textContent = `${cfg.gate_release_ms} ms`;
+    updateGateMarkerPosition(cfg.gate_threshold_db);
     
     // Equalizer
     dom.eqCheckbox.checked = cfg.eq_enabled;
@@ -650,11 +663,18 @@ function setupEventListeners() {
     };
     
     // Advanced Noise Gate
-    dom.gateCheckbox.onchange = (e) => sendConfigChange('gate_enabled', e.target.checked);
+    dom.gateCheckbox.onchange = (e) => {
+        const val = e.target.checked;
+        sendConfigChange('gate_enabled', val);
+        settings.gate_enabled = val;
+        updateGateMarkerPosition(settings.gate_threshold_db);
+    };
     dom.gateThreshSlider.oninput = (e) => {
         const val = parseInt(e.target.value);
         dom.gateThreshVal.textContent = `${val} dB`;
         sendConfigChange('gate_threshold_db', val);
+        settings.gate_threshold_db = val;
+        updateGateMarkerPosition(val);
     };
     dom.gateReleaseSlider.oninput = (e) => {
         const val = parseInt(e.target.value);
