@@ -355,14 +355,28 @@ class AudioProcessor:
         self.output_accumulator = np.array([], dtype=np.float32)
         self.monitor_accumulator = np.array([], dtype=np.float32)
         
-        # Start processing thread
-        self.processor_thread = threading.Thread(target=self._processing_loop, daemon=True)
-        self.processor_thread.start()
-        
         # Open audio devices
         input_idx = self._find_device_idx(self.settings["input_device"], is_input=True)
         output_idx = self._find_device_idx(self.settings["output_device"], is_input=False)
         monitor_idx = self._find_device_idx(self.settings["monitor_device"], is_input=False)
+        
+        # Negotiate sample rate and frame block sizes before initializing streams
+        self.sr = self._negotiate_sample_rate(input_idx, output_idx, monitor_idx)
+        self.block_size = int(self.sr * 0.01)  # 10ms frame size
+        
+        # Re-initialize DSP modules with the negotiated sample rate
+        self.eco_ns = SpectralSubtractedNoiseSuppression(
+            block_size=self.block_size, 
+            hop_size=self.block_size // 2, 
+            sr=self.sr
+        )
+        self.eq = Equalizer3Band(sr=self.sr)
+        self.compressor = DynamicsCompressor(sr=self.sr)
+        self.update_settings(self.settings)
+        
+        # Start processing thread
+        self.processor_thread = threading.Thread(target=self._processing_loop, daemon=True)
+        self.processor_thread.start()
         
         try:
             self.input_stream = sd.InputStream(
@@ -494,6 +508,37 @@ class AudioProcessor:
         default = sd.default.device[0] if is_input else sd.default.device[1]
         return default
 
+    def _negotiate_sample_rate(self, input_idx, output_idx, monitor_idx):
+        rates_to_try = [48000, 44100]
+        
+        # Gather default samplerates of the devices as fallbacks
+        devs = sd.query_devices()
+        fallback_rates = []
+        for idx in [input_idx, output_idx, monitor_idx]:
+            if idx is not None and idx < len(devs):
+                rate = int(devs[idx]["default_samplerate"])
+                if rate not in rates_to_try and rate not in fallback_rates:
+                    fallback_rates.append(rate)
+        rates_to_try.extend(fallback_rates)
+        
+        for rate in rates_to_try:
+            try:
+                # check_input_settings/check_output_settings check PortAudio compatibility
+                sd.check_input_settings(device=input_idx, samplerate=rate, channels=1)
+                sd.check_output_settings(device=output_idx, samplerate=rate, channels=2)
+                if self.settings["monitor_enabled"] and monitor_idx is not None:
+                    sd.check_output_settings(device=monitor_idx, samplerate=rate, channels=2)
+                
+                print(f"Sample rate negotiated: {rate} Hz")
+                return rate
+            except Exception:
+                continue
+                
+        # Last resort fallback
+        if input_idx is not None and input_idx < len(devs):
+            return int(devs[input_idx]["default_samplerate"])
+        return 48000
+
     def _processing_loop(self):
         print("Audio processing thread started.")
         while self.running.is_set():
@@ -533,7 +578,10 @@ class AudioProcessor:
                 self.gate_gain = 1.0
                 
             ns_mode = self.settings["ns_mode"]
-            if ns_mode == "high" and self.df_available:
+            hop = self.block_size // 2
+            
+            # DeepFilterNet is strictly designed for 48kHz. Fallback to Eco DSP at other sample rates.
+            if ns_mode == "high" and self.df_available and self.sr == 48000:
                 try:
                     frame_t = self.torch_module.from_numpy(frame).float().unsqueeze(0)
                     with self.torch_module.no_grad():
@@ -541,12 +589,12 @@ class AudioProcessor:
                     frame = enhanced_t.squeeze(0).numpy().copy()
                 except Exception as e:
                     print(f"DeepFilterNet frame processing error, falling back: {e}", file=sys.stderr)
-                    frame_half1 = self.eco_ns.process(frame[:240], strength=self.settings["ns_eco_strength"])
-                    frame_half2 = self.eco_ns.process(frame[240:], strength=self.settings["ns_eco_strength"])
+                    frame_half1 = self.eco_ns.process(frame[:hop], strength=self.settings["ns_eco_strength"])
+                    frame_half2 = self.eco_ns.process(frame[hop:], strength=self.settings["ns_eco_strength"])
                     frame = np.concatenate([frame_half1, frame_half2])
-            elif ns_mode == "eco":
-                frame_half1 = self.eco_ns.process(frame[:240], strength=self.settings["ns_eco_strength"])
-                frame_half2 = self.eco_ns.process(frame[240:], strength=self.settings["ns_eco_strength"])
+            elif ns_mode in ["high", "eco"]: # If HQ AI is selected but sample rate != 48kHz, run Eco DSP
+                frame_half1 = self.eco_ns.process(frame[:hop], strength=self.settings["ns_eco_strength"])
+                frame_half2 = self.eco_ns.process(frame[hop:], strength=self.settings["ns_eco_strength"])
                 frame = np.concatenate([frame_half1, frame_half2])
                 
             if self.settings["eq_enabled"]:
