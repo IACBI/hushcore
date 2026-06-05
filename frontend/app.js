@@ -30,6 +30,7 @@ const dom = {
     engineStatus: document.getElementById('engine-status'),
     aiStatus: document.getElementById('ai-status'),
     connIndicator: document.getElementById('connection-indicator'),
+    refreshDevicesBtn: document.getElementById('refresh-devices-btn'),
     
     // Routing panel
     inputSelect: document.getElementById('input-device-select'),
@@ -597,6 +598,20 @@ function setupEventListeners() {
         }
     };
     
+    // Refresh audio devices button click handler
+    dom.refreshDevicesBtn.onclick = async () => {
+        dom.refreshDevicesBtn.classList.add('spinning');
+        try {
+            await fetchDevices();
+        } catch (e) {
+            console.error("Failed to refresh devices", e);
+        } finally {
+            setTimeout(() => {
+                dom.refreshDevicesBtn.classList.remove('spinning');
+            }, 450);
+        }
+    };
+
     // Change Routing selection dropdowns
     dom.inputSelect.onchange = (e) => sendConfigChange('input_device', e.target.value);
     dom.outputSelect.onchange = (e) => {

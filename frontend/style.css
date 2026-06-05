@@ -250,6 +250,38 @@ body {
     background: rgba(255, 0, 127, 0.15);
 }
 
+.icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.15s ease, transform 0.15s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px;
+    border-radius: 4px;
+}
+
+.icon-btn:hover {
+    color: var(--neon-cyan);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.icon-btn:active {
+    transform: scale(0.9);
+}
+
+.icon-btn.spinning {
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
 /* View switching layouts */
 .mode-simple .adv-only {
     display: none !important;
