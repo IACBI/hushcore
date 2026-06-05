@@ -4,6 +4,8 @@ sounddevice
 numpy
 scipy
 websockets
+pedalboard
+pystray
 # Optional for DeepFilterNet support:
 # torch
 # torchaudio

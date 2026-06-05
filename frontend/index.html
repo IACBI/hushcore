@@ -106,6 +106,19 @@
                                 </select>
                             </div>
                         </div>
+                        
+                        <div class="control-group adv-only" style="margin-top: 15px;">
+                            <label for="buffer-size-select">Latency Buffer Size</label>
+                            <div class="select-wrapper">
+                                <select id="buffer-size-select" class="glow-select">
+                                    <option value="auto">Auto (Driver Negotiated)</option>
+                                    <option value="64">64 samples (Ultra Low Latency)</option>
+                                    <option value="128">128 samples (Low Latency)</option>
+                                    <option value="256">256 samples (Standard)</option>
+                                    <option value="512">512 samples (High Stability)</option>
+                                </select>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -164,6 +177,7 @@
                         <div class="visualizer-tabs">
                             <button id="viz-tab-spec" class="tab-btn active">SPECTRUM</button>
                             <button id="viz-tab-wave" class="tab-btn">WAVEFORM</button>
+                            <button id="viz-tab-cascade" class="tab-btn">3D CASCADE</button>
                         </div>
                     </div>
                     <div class="viz-body">
@@ -250,6 +264,7 @@
                             <button class="tab-btn" data-target="tab-comp">COMP</button>
                             <button class="tab-btn" data-target="tab-deess">DE-ESSER</button>
                             <button class="tab-btn" data-target="tab-excite">EXCITER</button>
+                            <button class="tab-btn" data-target="tab-vst">VST3 HOST</button>
                         </div>
                     </div>
                     <div class="card-content">
@@ -449,6 +464,32 @@
                                     </div>
                                     <input type="range" id="exciter-mix-slider" min="0" max="50" step="1" value="15">
                                 </div>
+                            </div>
+                        </div>
+
+                        <!-- TAB: VST3 HOST -->
+                        <div id="tab-vst" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="vst-enabled-checkbox">
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable VST3 Plugin</span>
+                                </div>
+                            </div>
+                            
+                            <div class="control-group" style="margin-top: 15px;">
+                                <label for="vst-path-input">VST3 File Path (.vst3)</label>
+                                <div style="display: flex; gap: 10px; margin-top: 8px;">
+                                    <input type="text" id="vst-path-input" placeholder="C:\Program Files\Common Files\VST3\Plugin.vst3" style="flex-grow: 1; padding: 6px 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; color: var(--text-primary); font-size: 11px;">
+                                    <button id="vst-load-btn" class="tab-btn" style="padding: 6px 12px; font-size: 10px;">LOAD</button>
+                                </div>
+                                <div id="vst-status-msg" class="info-bubble" style="margin-top: 10px; display: none;"></div>
+                            </div>
+                            
+                            <div style="margin-top: 15px; display: flex; justify-content: flex-end;">
+                                <button id="vst-editor-btn" class="power-button" style="padding: 6px 15px; font-size: 11px; margin-top: 0; min-height: unset; height: 32px;">🎛️ OPEN PLUGIN EDITOR</button>
                             </div>
                         </div>
                     </div>

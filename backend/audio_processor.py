@@ -6,6 +6,11 @@ import scipy.signal as signal
 import sounddevice as sd
 import sys
 
+try:
+    from pedalboard import VST3Plugin
+except ImportError:
+    VST3Plugin = None
+
 class SpectralSubtractedNoiseSuppression:
     def __init__(self, block_size=480, hop_size=240, sr=48000):
         self.block_size = block_size
@@ -301,6 +306,9 @@ class AudioProcessor:
         self.compressor = DynamicsCompressor(sr=self.sr)
         self.deesser = VocalDeEsser(sr=self.sr)
         self.exciter = VocalExciter(sr=self.sr)
+        self.vst_plugin = None
+        self.vst_failed = False
+        self._loaded_vst_path = ""
         
         # DeepFilterNet integration
         self.df_available = False
@@ -385,6 +393,31 @@ class AudioProcessor:
             self.settings.get("exciter_amount", 0.2),
             self.settings.get("exciter_mix", 0.15)
         )
+        
+        # Update VST3 Plugin
+        vst_enabled = self.settings.get("vst_enabled", False)
+        vst_path = self.settings.get("vst_path", "")
+        
+        if not vst_enabled or not vst_path:
+            if self.vst_plugin is not None:
+                print("Unloading VST3 plugin...")
+                self.vst_plugin = None
+            self.vst_failed = False
+        else:
+            if self.vst_plugin is None or self._loaded_vst_path != vst_path:
+                print(f"Loading VST3 plugin: {vst_path}")
+                try:
+                    if VST3Plugin is not None:
+                        self.vst_plugin = VST3Plugin(vst_path)
+                        self._loaded_vst_path = vst_path
+                        self.vst_failed = False
+                        print(f"Successfully loaded VST3: {self.vst_plugin.name}")
+                    else:
+                        raise ImportError("pedalboard is not installed or VST3Plugin could not be imported.")
+                except Exception as e:
+                    print(f"Error loading VST3 plugin: {e}", file=sys.stderr)
+                    self.vst_plugin = None
+                    self.vst_failed = True
 
     def get_devices(self):
         devices = sd.query_devices()
@@ -514,16 +547,25 @@ class AudioProcessor:
         self.processor_thread = threading.Thread(target=self._processing_loop, daemon=True)
         self.processor_thread.start()
         
+        # Determine stream block size for manual latency tuning
+        stream_blocksize = 0
+        buf_size_setting = self.settings.get("buffer_size", "auto")
+        if buf_size_setting != "auto":
+            try:
+                stream_blocksize = int(buf_size_setting)
+            except ValueError:
+                pass
+
         try:
             self.input_stream = sd.InputStream(
                 device=input_idx,
                 samplerate=self.sr,
                 channels=1,
-                blocksize=0,
+                blocksize=stream_blocksize,
                 callback=self._input_callback
             )
             self.input_stream.start()
-            print(f"Started input stream on device {input_idx}")
+            print(f"Started input stream on device {input_idx} (blocksize={stream_blocksize})")
         except Exception as e:
             print(f"Failed to start input stream: {e}", file=sys.stderr)
             self.stop()
@@ -534,7 +576,7 @@ class AudioProcessor:
                 device=output_idx,
                 samplerate=self.sr,
                 channels=2,
-                blocksize=0,
+                blocksize=stream_blocksize,
                 callback=self._output_callback
             )
             self.output_stream.start()
@@ -555,12 +597,20 @@ class AudioProcessor:
         if monitor_idx is None:
             return
             
+        stream_blocksize = 0
+        buf_size_setting = self.settings.get("buffer_size", "auto")
+        if buf_size_setting != "auto":
+            try:
+                stream_blocksize = int(buf_size_setting)
+            except ValueError:
+                pass
+
         try:
             self.monitor_stream = sd.OutputStream(
                 device=monitor_idx,
                 samplerate=self.sr,
                 channels=2,
-                blocksize=0,
+                blocksize=stream_blocksize,
                 callback=self._monitor_callback
             )
             self.monitor_stream.start()
@@ -746,6 +796,16 @@ class AudioProcessor:
             # Vocal Exciter: late placement before Peak Limiter
             if self.settings.get("exciter_enabled", False):
                 frame = self.exciter.process(frame)
+                
+            # VST3 Hosting: processed right before Peak Limiter
+            if self.settings.get("vst_enabled", False) and self.vst_plugin is not None:
+                try:
+                    # Reshape to 2D (channels, samples) for pedalboard VST
+                    audio_2d = frame.reshape(1, -1)
+                    processed_2d = self.vst_plugin(audio_2d, self.sr)
+                    frame = processed_2d.flatten()
+                except Exception:
+                    pass
                 
             lim_thresh = 10.0 ** (self.settings["limiter_threshold_db"] / 20.0)
             peak = np.max(np.abs(frame))

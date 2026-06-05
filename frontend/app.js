@@ -2,8 +2,9 @@
    HUSHCORE - CLIENT APPLICATION LOGIC
    ========================================================================== */
 
+const HUSHCORE_API_KEY = window.HUSHCORE_API_KEY || '';
 const API_BASE = window.location.origin;
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `ws://${window.location.host}/ws?token=${HUSHCORE_API_KEY}`;
 
 let socket = null;
 let settings = {};
@@ -16,6 +17,14 @@ let smoothedFFT = new Array(64).fill(0);
 let inputLevelSmoothed = -60;
 let outputLevelSmoothed = -60;
 let isGateOpen = false;
+
+// 3D Cascade History Buffer
+let cascadeHistory = [];
+const maxCascadeFrames = 30;
+
+// VST State tracking
+let isVstLoaded = false;
+let isVstFailed = false;
 
 // DOM Cache
 const dom = {
@@ -114,7 +123,20 @@ const dom = {
     exciterAmountSlider: document.getElementById('exciter-amount-slider'),
     exciterAmountVal: document.getElementById('exciter-amount-val'),
     exciterMixSlider: document.getElementById('exciter-mix-slider'),
-    exciterMixVal: document.getElementById('exciter-mix-val')
+    exciterMixVal: document.getElementById('exciter-mix-val'),
+
+    // Advanced VST3 Hosting
+    vstCheckbox: document.getElementById('vst-enabled-checkbox'),
+    vstPathInput: document.getElementById('vst-path-input'),
+    vstLoadBtn: document.getElementById('vst-load-btn'),
+    vstStatusMsg: document.getElementById('vst-status-msg'),
+    vstEditorBtn: document.getElementById('vst-editor-btn'),
+    
+    // Latency Buffer tuning
+    bufferSizeSelect: document.getElementById('buffer-size-select'),
+    
+    // Visualizer tabs
+    vizTabCascade: document.getElementById('viz-tab-cascade')
 };
 
 // Canvas context setup
@@ -145,14 +167,18 @@ async function init() {
 
 // --- API Services ---
 async function fetchSettings() {
-    const res = await fetch(`${API_BASE}/api/settings`);
+    const res = await fetch(`${API_BASE}/api/settings`, {
+        headers: { 'X-API-Key': HUSHCORE_API_KEY }
+    });
     settings = await res.json();
     applySettingsToUI(settings);
     detectActivePreset(settings);
 }
 
 async function fetchDevices() {
-    const res = await fetch(`${API_BASE}/api/devices`);
+    const res = await fetch(`${API_BASE}/api/devices`, {
+        headers: { 'X-API-Key': HUSHCORE_API_KEY }
+    });
     devices = await res.json();
     populateDevices(devices);
 }
@@ -291,13 +317,19 @@ function applySettingsToUI(cfg) {
     dom.deesserAmountVal.textContent = `${Math.round(cfg.deesser_amount * 100)}%`;
 
     // Vocal Exciter
-    dom.exciterCheckbox.checked = cfg.exciter_enabled;
     dom.exciterFreqSlider.value = cfg.exciter_frequency;
     dom.exciterFreqVal.textContent = `${cfg.exciter_frequency} Hz`;
     dom.exciterAmountSlider.value = Math.round(cfg.exciter_amount * 100);
     dom.exciterAmountVal.textContent = `${Math.round(cfg.exciter_amount * 100)}%`;
     dom.exciterMixSlider.value = Math.round(cfg.exciter_mix * 100);
     dom.exciterMixVal.textContent = `${Math.round(cfg.exciter_mix * 100)}%`;
+    
+    // VST3 Hosting
+    dom.vstCheckbox.checked = cfg.vst_enabled;
+    dom.vstPathInput.value = cfg.vst_path || "";
+    
+    // Latency Buffer size
+    dom.bufferSizeSelect.value = cfg.buffer_size || "auto";
 }
 
 function updateNSModeButtons(mode) {
@@ -348,7 +380,10 @@ function sendConfigChange(key, value) {
     } else {
         fetch(`${API_BASE}/api/settings`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-API-Key': HUSHCORE_API_KEY
+            },
             body: JSON.stringify({ key, value })
         }).catch(err => console.error("REST update failed:", err));
     }
@@ -411,6 +446,10 @@ function updateUIWithMetrics(m) {
     outputLevelSmoothed = outputLevelSmoothed * 0.7 + m.output_rms * 0.3;
     
     rawFFTData = m.fft_data;
+    
+    // VST Status
+    isVstLoaded = m.vst_loaded || false;
+    isVstFailed = m.vst_failed || false;
 }
 
 function dbToPercent(db) {
@@ -437,7 +476,8 @@ function applyPreset(presetId) {
             eq_enabled: false,
             compressor_enabled: false,
             deesser_enabled: false,
-            exciter_enabled: false
+            exciter_enabled: false,
+            vst_enabled: false
         };
     } 
     else if (presetId === 'voice') {
@@ -458,7 +498,8 @@ function applyPreset(presetId) {
             compressor_attack_ms: 10.0,
             compressor_release_ms: 100.0,
             deesser_enabled: false,
-            exciter_enabled: false
+            exciter_enabled: false,
+            vst_enabled: false
         };
     } 
     else if (presetId === 'gaming') {
@@ -479,7 +520,8 @@ function applyPreset(presetId) {
             compressor_attack_ms: 5.0,
             compressor_release_ms: 80.0,
             deesser_enabled: false,
-            exciter_enabled: false
+            exciter_enabled: false,
+            vst_enabled: false
         };
     } 
     else if (presetId === 'broadcaster') {
@@ -505,7 +547,8 @@ function applyPreset(presetId) {
             exciter_enabled: true,
             exciter_frequency: 3000.0,
             exciter_amount: 0.2,
-            exciter_mix: 0.15
+            exciter_mix: 0.15,
+            vst_enabled: false
         };
     }
     
@@ -632,7 +675,10 @@ function setupEventListeners() {
         const route = isRunning ? '/api/stop' : '/api/start';
         
         try {
-            const res = await fetch(`${API_BASE}${route}`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${route}`, { 
+                method: 'POST',
+                headers: { 'X-API-Key': HUSHCORE_API_KEY }
+            });
             if (res.ok) {
                 await fetchSettings();
             } else {
@@ -817,17 +863,62 @@ function setupEventListeners() {
         sendConfigChange('exciter_mix', val / 100);
     };
     
+    // Advanced VST3 Plugin
+    dom.vstCheckbox.onchange = (e) => sendConfigChange('vst_enabled', e.target.checked);
+    dom.vstLoadBtn.onclick = () => {
+        const path = dom.vstPathInput.value.trim();
+        sendConfigChange('vst_path', path);
+        
+        dom.vstStatusMsg.style.display = 'block';
+        dom.vstStatusMsg.textContent = "Yükleniyor (Loading VST)...";
+        dom.vstStatusMsg.className = "info-bubble";
+        
+        // Wait a moment and fetch updated settings
+        setTimeout(async () => {
+            await fetchSettings();
+            if (settings.vst_enabled && settings.vst_path && !isVstFailed) {
+                dom.vstStatusMsg.textContent = "VST3 başarıyla yüklendi! (Successfully loaded VST3)";
+                dom.vstStatusMsg.className = "info-bubble success-glow";
+            } else {
+                dom.vstStatusMsg.textContent = "Yükleme başarısız. Dosya yolunu kontrol edin. (Failed to load VST3)";
+                dom.vstStatusMsg.className = "info-bubble warning-glow";
+            }
+        }, 1500);
+    };
+    
+    dom.vstEditorBtn.onclick = async () => {
+        try {
+            await fetch(`${API_BASE}/api/vst/show-editor`, {
+                method: 'POST',
+                headers: { 'X-API-Key': HUSHCORE_API_KEY }
+            });
+        } catch (e) {
+            console.error("Failed to show editor", e);
+        }
+    };
+    
+    // Latency Buffer size tuning
+    dom.bufferSizeSelect.onchange = (e) => {
+        sendConfigChange('buffer_size', e.target.value);
+        alert("Gecikme tampon boyutu değişikliği ses motoru yeniden başlatıldığında (STOP/START) aktif olacaktır.");
+    };
+    
     // Visualizer Mode
-    dom.vizTabSpec.onclick = () => {
-        dom.vizTabSpec.classList.add('active');
-        dom.vizTabWave.classList.remove('active');
-        currentVizMode = 'spec';
-    };
-    dom.vizTabWave.onclick = () => {
-        dom.vizTabWave.classList.add('active');
+    dom.vizTabSpec.onclick = () => setVizMode('spec');
+    dom.vizTabWave.onclick = () => setVizMode('wave');
+    dom.vizTabCascade.onclick = () => setVizMode('cascade');
+    
+    function setVizMode(mode) {
         dom.vizTabSpec.classList.remove('active');
-        currentVizMode = 'wave';
-    };
+        dom.vizTabWave.classList.remove('active');
+        dom.vizTabCascade.classList.remove('active');
+        
+        if (mode === 'spec') dom.vizTabSpec.classList.add('active');
+        if (mode === 'wave') dom.vizTabWave.classList.add('active');
+        if (mode === 'cascade') dom.vizTabCascade.classList.add('active');
+        
+        currentVizMode = mode;
+    }
 }
 
 // --- High-Performance Animation/Drawing Loop ---
@@ -856,8 +947,15 @@ function startVisualizationLoop() {
         
         if (currentVizMode === 'spec') {
             drawSpectrum(w, h);
-        } else {
+        } else if (currentVizMode === 'wave') {
             drawWaveform(w, h);
+        } else if (currentVizMode === 'cascade') {
+            // Push current smoothed values to history buffer
+            cascadeHistory.push([...smoothedFFT]);
+            if (cascadeHistory.length > maxCascadeFrames) {
+                cascadeHistory.shift();
+            }
+            drawCascade(w, h);
         }
     }
     requestAnimationFrame(draw);
@@ -933,6 +1031,45 @@ function drawWaveform(w, h) {
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = '#00f2fe';
     ctx.stroke();
+}
+
+function drawCascade(w, h) {
+    if (cascadeHistory.length === 0) return;
+    
+    const points = 36;
+    const stepX = w / (points - 1);
+    
+    // Projection offsets for 3D isometric waterfall
+    const offsetX = 0.8;
+    const offsetY = 2.2;
+    
+    for (let f = 0; f < cascadeHistory.length; f++) {
+        const fftFrame = cascadeHistory[f];
+        const pct = f / (cascadeHistory.length - 1); // 0 = oldest, 1 = newest
+        
+        const startXOffset = (cascadeHistory.length - 1 - f) * offsetX;
+        const startYOffset = (cascadeHistory.length - 1 - f) * offsetY;
+        
+        ctx.beginPath();
+        for (let i = 0; i < points; i++) {
+            const x = startXOffset + i * stepX * 0.95;
+            const val = fftFrame[i] || 0;
+            const amplitude = val * (h * 0.35);
+            const y = (h - 10) - startYOffset - amplitude;
+            
+            if (i === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        
+        ctx.lineWidth = 1 + pct * 0.8;
+        const alpha = 0.08 + pct * 0.5;
+        const hue = 180 + (1 - pct) * 120; // Neon cyan to neon purple
+        ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha})`;
+        ctx.stroke();
+    }
 }
 
 // Start application

@@ -46,7 +46,14 @@ DEFAULT_SETTINGS = {
     "exciter_enabled": False,
     "exciter_frequency": 3000.0,
     "exciter_amount": 0.2,
-    "exciter_mix": 0.15
+    "exciter_mix": 0.15,
+    
+    # VST3 Hosting
+    "vst_enabled": False,
+    "vst_path": "",
+    
+    # Latency Tuning
+    "buffer_size": "auto"
 }
 
 def load_settings():
