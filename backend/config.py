@@ -35,7 +35,18 @@ DEFAULT_SETTINGS = {
     "compressor_release_ms": 100.0,
     
     # Limiter
-    "limiter_threshold_db": -1.0
+    "limiter_threshold_db": -1.0,
+    
+    # De-Esser
+    "deesser_enabled": False,
+    "deesser_threshold_db": -25.0,
+    "deesser_amount": 0.5,
+    
+    # Vocal Exciter
+    "exciter_enabled": False,
+    "exciter_frequency": 3000.0,
+    "exciter_amount": 0.2,
+    "exciter_mix": 0.15
 }
 
 def load_settings():

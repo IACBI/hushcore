@@ -98,7 +98,23 @@ const dom = {
     compAttackSlider: document.getElementById('comp-attack-slider'),
     compAttackVal: document.getElementById('comp-attack-val'),
     compReleaseSlider: document.getElementById('comp-release-slider'),
-    compReleaseVal: document.getElementById('comp-release-val')
+    compReleaseVal: document.getElementById('comp-release-val'),
+
+    // Advanced De-Esser
+    deesserCheckbox: document.getElementById('deesser-enabled-checkbox'),
+    deesserThreshSlider: document.getElementById('deesser-thresh-slider'),
+    deesserThreshVal: document.getElementById('deesser-thresh-val'),
+    deesserAmountSlider: document.getElementById('deesser-amount-slider'),
+    deesserAmountVal: document.getElementById('deesser-amount-val'),
+
+    // Advanced Vocal Exciter
+    exciterCheckbox: document.getElementById('exciter-enabled-checkbox'),
+    exciterFreqSlider: document.getElementById('exciter-freq-slider'),
+    exciterFreqVal: document.getElementById('exciter-freq-val'),
+    exciterAmountSlider: document.getElementById('exciter-amount-slider'),
+    exciterAmountVal: document.getElementById('exciter-amount-val'),
+    exciterMixSlider: document.getElementById('exciter-mix-slider'),
+    exciterMixVal: document.getElementById('exciter-mix-val')
 };
 
 // Canvas context setup
@@ -266,6 +282,22 @@ function applySettingsToUI(cfg) {
     dom.compAttackVal.textContent = `${cfg.compressor_attack_ms} ms`;
     dom.compReleaseSlider.value = cfg.compressor_release_ms;
     dom.compReleaseVal.textContent = `${cfg.compressor_release_ms} ms`;
+    
+    // De-Esser
+    dom.deesserCheckbox.checked = cfg.deesser_enabled;
+    dom.deesserThreshSlider.value = cfg.deesser_threshold_db;
+    dom.deesserThreshVal.textContent = `${cfg.deesser_threshold_db} dB`;
+    dom.deesserAmountSlider.value = Math.round(cfg.deesser_amount * 100);
+    dom.deesserAmountVal.textContent = `${Math.round(cfg.deesser_amount * 100)}%`;
+
+    // Vocal Exciter
+    dom.exciterCheckbox.checked = cfg.exciter_enabled;
+    dom.exciterFreqSlider.value = cfg.exciter_frequency;
+    dom.exciterFreqVal.textContent = `${cfg.exciter_frequency} Hz`;
+    dom.exciterAmountSlider.value = Math.round(cfg.exciter_amount * 100);
+    dom.exciterAmountVal.textContent = `${Math.round(cfg.exciter_amount * 100)}%`;
+    dom.exciterMixSlider.value = Math.round(cfg.exciter_mix * 100);
+    dom.exciterMixVal.textContent = `${Math.round(cfg.exciter_mix * 100)}%`;
 }
 
 function updateNSModeButtons(mode) {
@@ -403,7 +435,9 @@ function applyPreset(presetId) {
             ns_mode: 'off',
             gate_enabled: false,
             eq_enabled: false,
-            compressor_enabled: false
+            compressor_enabled: false,
+            deesser_enabled: false,
+            exciter_enabled: false
         };
     } 
     else if (presetId === 'voice') {
@@ -422,7 +456,9 @@ function applyPreset(presetId) {
             compressor_threshold_db: -18.0,
             compressor_ratio: 3.0,
             compressor_attack_ms: 10.0,
-            compressor_release_ms: 100.0
+            compressor_release_ms: 100.0,
+            deesser_enabled: false,
+            exciter_enabled: false
         };
     } 
     else if (presetId === 'gaming') {
@@ -441,7 +477,9 @@ function applyPreset(presetId) {
             compressor_threshold_db: -14.0,
             compressor_ratio: 3.5,
             compressor_attack_ms: 5.0,
-            compressor_release_ms: 80.0
+            compressor_release_ms: 80.0,
+            deesser_enabled: false,
+            exciter_enabled: false
         };
     } 
     else if (presetId === 'broadcaster') {
@@ -460,7 +498,14 @@ function applyPreset(presetId) {
             compressor_threshold_db: -22.0,
             compressor_ratio: 4.0,
             compressor_attack_ms: 12.0,
-            compressor_release_ms: 120.0
+            compressor_release_ms: 120.0,
+            deesser_enabled: true,
+            deesser_threshold_db: -25.0,
+            deesser_amount: 0.5,
+            exciter_enabled: true,
+            exciter_frequency: 3000.0,
+            exciter_amount: 0.2,
+            exciter_mix: 0.15
         };
     }
     
@@ -739,6 +784,37 @@ function setupEventListeners() {
         const val = parseInt(e.target.value);
         dom.compReleaseVal.textContent = `${val} ms`;
         sendConfigChange('compressor_release_ms', val);
+    };
+    
+    // Advanced De-Esser
+    dom.deesserCheckbox.onchange = (e) => sendConfigChange('deesser_enabled', e.target.checked);
+    dom.deesserThreshSlider.oninput = (e) => {
+        const val = parseInt(e.target.value);
+        dom.deesserThreshVal.textContent = `${val} dB`;
+        sendConfigChange('deesser_threshold_db', val);
+    };
+    dom.deesserAmountSlider.oninput = (e) => {
+        const val = parseInt(e.target.value);
+        dom.deesserAmountVal.textContent = `${val}%`;
+        sendConfigChange('deesser_amount', val / 100);
+    };
+
+    // Advanced Vocal Exciter
+    dom.exciterCheckbox.onchange = (e) => sendConfigChange('exciter_enabled', e.target.checked);
+    dom.exciterFreqSlider.oninput = (e) => {
+        const val = parseInt(e.target.value);
+        dom.exciterFreqVal.textContent = `${val} Hz`;
+        sendConfigChange('exciter_frequency', val);
+    };
+    dom.exciterAmountSlider.oninput = (e) => {
+        const val = parseInt(e.target.value);
+        dom.exciterAmountVal.textContent = `${val}%`;
+        sendConfigChange('exciter_amount', val / 100);
+    };
+    dom.exciterMixSlider.oninput = (e) => {
+        const val = parseInt(e.target.value);
+        dom.exciterMixVal.textContent = `${val}%`;
+        sendConfigChange('exciter_mix', val / 100);
     };
     
     // Visualizer Mode

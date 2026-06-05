@@ -170,6 +170,125 @@ class DynamicsCompressor:
         return data * gain_linear
 
 
+class VocalExciter:
+    def __init__(self, sr=48000):
+        self.sr = sr
+        self.freq = 3000.0
+        self.amount = 0.2
+        self.mix = 0.15
+        self.update_filters()
+        self.reset_state()
+        
+    def reset_state(self):
+        self.zi = np.zeros(2, dtype=np.float32)
+        
+    def update_params(self, freq, amount, mix):
+        if freq != self.freq:
+            self.freq = freq
+            self.update_filters()
+        self.amount = amount
+        self.mix = mix
+        
+    def update_filters(self):
+        # Design high pass filter at self.freq
+        w0 = 2.0 * np.pi * self.freq / self.sr
+        cos_w0 = np.cos(w0)
+        alpha = np.sin(w0) / (2.0 * 0.707)  # Q = 0.707
+        
+        b0 = (1.0 + cos_w0) / 2.0
+        b1 = -(1.0 + cos_w0)
+        b2 = (1.0 + cos_w0) / 2.0
+        a0 = 1.0 + alpha
+        a1 = -2.0 * cos_w0
+        a2 = 1.0 - alpha
+        
+        self.b = np.array([b0, b1, b2], dtype=np.float32) / a0
+        self.a = np.array([a0, a1, a2], dtype=np.float32) / a0
+        
+    def process(self, data):
+        # High pass filter
+        hp_data, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        # Generate harmonics
+        excited = np.tanh(hp_data * (1.0 + self.amount * 5.0))
+        # Mix back
+        out = data * (1.0 - self.mix) + excited * self.mix
+        return out.astype(np.float32)
+
+
+class VocalDeEsser:
+    def __init__(self, sr=48000):
+        self.sr = sr
+        self.threshold_db = -25.0
+        self.amount = 0.5
+        self.freq = 6000.0  # Center sibilant frequency
+        self.update_filters()
+        self.reset_state()
+        
+    def reset_state(self):
+        self.zi_bp = np.zeros(2, dtype=np.float32)
+        self.zi_hs = np.zeros(2, dtype=np.float32)
+        self.env = 0.0
+        
+    def update_params(self, threshold_db, amount):
+        self.threshold_db = threshold_db
+        self.amount = amount
+        
+    def update_filters(self):
+        # Band-pass filter centered at 6kHz (sibilant band)
+        w0 = 2.0 * np.pi * self.freq / self.sr
+        cos_w0 = np.cos(w0)
+        alpha = np.sin(w0) / (2.0 * 1.0)  # Q = 1.0
+        
+        b0 = alpha
+        b1 = 0.0
+        b2 = -alpha
+        a0 = 1.0 + alpha
+        a1 = -2.0 * cos_w0
+        a2 = 1.0 - alpha
+        
+        self.b_bp = np.array([b0, b1, b2], dtype=np.float32) / a0
+        self.a_bp = np.array([a0, a1, a2], dtype=np.float32) / a0
+        
+    def process(self, data):
+        # Isolate sibilant energy
+        sib_data, self.zi_bp = signal.lfilter(self.b_bp, self.a_bp, data, zi=self.zi_bp)
+        
+        # Compute envelope of sibilant energy
+        sib_rms = np.sqrt(np.mean(sib_data**2) + 1e-12)
+        
+        # Smooth envelope
+        alpha_env = np.exp(-10.0 / 15.0)  # 15ms release time
+        self.env = alpha_env * self.env + (1.0 - alpha_env) * sib_rms
+        env_db = 20.0 * np.log10(self.env + 1e-12)
+        
+        gain_reduction_db = 0.0
+        if env_db > self.threshold_db:
+            excess_db = env_db - self.threshold_db
+            gain_reduction_db = -excess_db * self.amount
+            gain_reduction_db = max(-15.0, gain_reduction_db)
+            
+        # Design high shelf filter starting at 5kHz for dynamic attenuation
+        f0 = 5000.0
+        A = 10.0 ** (gain_reduction_db / 40.0)
+        w0 = 2.0 * np.pi * f0 / self.sr
+        cos_w0 = np.cos(w0)
+        alpha = np.sin(w0) / 2.0 * np.sqrt((A + 1.0/A)*(1.0/0.707 - 1.0) + 2.0)
+        
+        b0 = A * ((A + 1.0) + (A - 1.0)*cos_w0 + 2.0*np.sqrt(A)*alpha)
+        b1 = -2.0 * A * ((A - 1.0) + (A + 1.0)*cos_w0)
+        b2 = A * ((A + 1.0) - (A - 1.0)*cos_w0 - 2.0*np.sqrt(A)*alpha)
+        
+        a0 = (A + 1.0) - (A - 1.0)*cos_w0 + 2.0*np.sqrt(A)*alpha
+        a1 = 2.0 * ((A - 1.0) - (A + 1.0)*cos_w0)
+        a2 = (A + 1.0) - (A - 1.0)*cos_w0 - 2.0*np.sqrt(A)*alpha
+        
+        b_hs = np.array([b0, b1, b2], dtype=np.float32) / a0
+        a_hs = np.array([a0, a1, a2], dtype=np.float32) / a0
+        
+        out, self.zi_hs = signal.lfilter(b_hs, a_hs, data, zi=self.zi_hs)
+        return out.astype(np.float32)
+
+
 class AudioProcessor:
     def __init__(self, settings):
         self.settings = settings
@@ -180,6 +299,8 @@ class AudioProcessor:
         self.eco_ns = SpectralSubtractedNoiseSuppression(sr=self.sr)
         self.eq = Equalizer3Band(sr=self.sr)
         self.compressor = DynamicsCompressor(sr=self.sr)
+        self.deesser = VocalDeEsser(sr=self.sr)
+        self.exciter = VocalExciter(sr=self.sr)
         
         # DeepFilterNet integration
         self.df_available = False
@@ -251,6 +372,19 @@ class AudioProcessor:
         self.compressor.ratio = self.settings["compressor_ratio"]
         self.compressor.attack_ms = max(1.0, self.settings["compressor_attack_ms"])
         self.compressor.release_ms = max(10.0, self.settings["compressor_release_ms"])
+        
+        # Update De-Esser
+        self.deesser.update_params(
+            self.settings.get("deesser_threshold_db", -25.0),
+            self.settings.get("deesser_amount", 0.5)
+        )
+        
+        # Update Vocal Exciter
+        self.exciter.update_params(
+            self.settings.get("exciter_frequency", 3000.0),
+            self.settings.get("exciter_amount", 0.2),
+            self.settings.get("exciter_mix", 0.15)
+        )
 
     def get_devices(self):
         devices = sd.query_devices()
@@ -372,6 +506,8 @@ class AudioProcessor:
         )
         self.eq = Equalizer3Band(sr=self.sr)
         self.compressor = DynamicsCompressor(sr=self.sr)
+        self.deesser = VocalDeEsser(sr=self.sr)
+        self.exciter = VocalExciter(sr=self.sr)
         self.update_settings(self.settings)
         
         # Start processing thread
@@ -597,11 +733,19 @@ class AudioProcessor:
                 frame_half2 = self.eco_ns.process(frame[hop:], strength=self.settings["ns_eco_strength"])
                 frame = np.concatenate([frame_half1, frame_half2])
                 
+            # De-Esser: early placement to soften sibilance before EQ/comp
+            if self.settings.get("deesser_enabled", False):
+                frame = self.deesser.process(frame)
+                
             if self.settings["eq_enabled"]:
                 frame = self.eq.process(frame)
                 
             if self.settings["compressor_enabled"]:
                 frame = self.compressor.process(frame)
+                
+            # Vocal Exciter: late placement before Peak Limiter
+            if self.settings.get("exciter_enabled", False):
+                frame = self.exciter.process(frame)
                 
             lim_thresh = 10.0 ** (self.settings["limiter_threshold_db"] / 20.0)
             peak = np.max(np.abs(frame))

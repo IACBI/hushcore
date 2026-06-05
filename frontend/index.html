@@ -248,6 +248,8 @@
                             <button class="tab-btn" data-target="tab-gate">GATE</button>
                             <button class="tab-btn" data-target="tab-eq">EQ</button>
                             <button class="tab-btn" data-target="tab-comp">COMP</button>
+                            <button class="tab-btn" data-target="tab-deess">DE-ESSER</button>
+                            <button class="tab-btn" data-target="tab-excite">EXCITER</button>
                         </div>
                     </div>
                     <div class="card-content">
@@ -378,6 +380,74 @@
                                         <span id="comp-release-val" class="slider-val">100 ms</span>
                                     </div>
                                     <input type="range" id="comp-release-slider" min="10" max="500" step="10" value="100">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- TAB: DE-ESSER -->
+                        <div id="tab-deess" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="deesser-enabled-checkbox">
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable De-Esser</span>
+                                </div>
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="deesser-thresh-slider">Mute Threshold</label>
+                                    <span id="deesser-thresh-val" class="slider-val">-25 dB</span>
+                                </div>
+                                <input type="range" id="deesser-thresh-slider" min="-60" max="0" step="1" value="-25">
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="deesser-amount-slider">Attenuation Amount</label>
+                                    <span id="deesser-amount-val" class="slider-val">50%</span>
+                                </div>
+                                <input type="range" id="deesser-amount-slider" min="0" max="100" step="5" value="50">
+                            </div>
+                        </div>
+
+                        <!-- TAB: EXCITER -->
+                        <div id="tab-excite" class="tab-panel">
+                            <div class="control-group">
+                                <div class="toggle-container">
+                                    <label class="switch">
+                                        <input type="checkbox" id="exciter-enabled-checkbox">
+                                        <span class="slider round"></span>
+                                    </label>
+                                    <span class="toggle-label">Enable Vocal Exciter</span>
+                                </div>
+                            </div>
+                            
+                            <div class="slider-group" style="margin-top: 15px;">
+                                <div class="slider-header">
+                                    <label for="exciter-freq-slider">Frequency</label>
+                                    <span id="exciter-freq-val" class="slider-val">3000 Hz</span>
+                                </div>
+                                <input type="range" id="exciter-freq-slider" min="1000" max="8000" step="100" value="3000">
+                            </div>
+
+                            <div class="grid-2-col" style="margin-top: 15px;">
+                                <div class="slider-group">
+                                    <div class="slider-header">
+                                        <label for="exciter-amount-slider">Harmonic Drive</label>
+                                        <span id="exciter-amount-val" class="slider-val">20%</span>
+                                    </div>
+                                    <input type="range" id="exciter-amount-slider" min="0" max="100" step="5" value="20">
+                                </div>
+                                
+                                <div class="slider-group">
+                                    <div class="slider-header">
+                                        <label for="exciter-mix-slider">Wet Mix</label>
+                                        <span id="exciter-mix-val" class="slider-val">15%</span>
+                                    </div>
+                                    <input type="range" id="exciter-mix-slider" min="0" max="50" step="1" value="15">
                                 </div>
                             </div>
                         </div>
