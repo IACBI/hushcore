@@ -1,15 +1,22 @@
 name: Release
 
 # Builds every platform's artifacts for a version tag and attaches them to a draft GitHub release.
+# Pushes to release-* branches and manual runs build and check every artifact without publishing.
 # Signing for distribution (driver attestation, Developer ID, notarization) is a separate,
 # credentialed step; see docs/SIGNING.md. The artifacts here are labelled by their signing state.
 
 on:
   push:
     tags: ["v*"]
+    branches: ["release-*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  # Tag name for a release; "dry-run" when started by hand.
+  RELEASE_NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'dry-run' }}
 
 jobs:
   engine:
@@ -34,6 +41,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Test
+        run: cargo test --release --locked --manifest-path engine/Cargo.toml
       - name: Build
         if: runner.os != 'macOS'
         run: cargo build --release --locked --manifest-path engine/Cargo.toml
@@ -46,16 +55,30 @@ jobs:
           lipo -create -output engine/target/release/hushcore-engine \
             engine/target/aarch64-apple-darwin/release/hushcore-engine \
             engine/target/x86_64-apple-darwin/release/hushcore-engine
-      - name: Package
+          lipo -info engine/target/release/hushcore-engine
+      - name: Check the binary runs
         shell: bash
+        # An unknown subcommand must load the binary and fail with the usage message.
         run: |
-          mkdir -p out
-          cp "engine/target/release/${{ matrix.binary }}" out/
-          cd out && 7z a "../hushcore-engine-${GITHUB_REF_NAME}-${{ matrix.name }}.zip" . > /dev/null
+          out=$("engine/target/release/${{ matrix.binary }}" bogus-subcommand 2>&1 || true)
+          echo "$out"
+          grep -q "unknown subcommand" <<< "$out"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          7z a "hushcore-engine-$env:RELEASE_NAME-${{ matrix.name }}.zip" "engine\target\release\${{ matrix.binary }}" | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x "engine/target/release/${{ matrix.binary }}"
+          zip -qj "hushcore-engine-${RELEASE_NAME}-${{ matrix.name }}.zip" "engine/target/release/${{ matrix.binary }}"
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.name }}
           path: hushcore-engine-*.zip
+          if-no-files-found: error
 
   windows-driver:
     runs-on: windows-2022
@@ -70,21 +93,35 @@ jobs:
           Export-Certificate -Cert $cert -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" | Out-Null
           Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
           Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
-      - name: Build and package
+      - name: Build and stage
         shell: pwsh
         run: |
           foreach ($platform in 'x64', 'ARM64') {
             & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform $platform
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: InfVerif
+        shell: pwsh
+        run: |
+          $infverif = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Tools\*\x64\infverif.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+          if (-not $infverif) { throw 'infverif.exe not found: the WDK is missing on this runner' }
+          foreach ($platform in 'x64', 'ARM64') {
+            & $infverif.FullName /w /u "dist\driver\windows\$platform\HushCoreAudio.inf"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Package
+        shell: pwsh
+        run: |
           # Keep the repository layout: install-driver.ps1 resolves dist\driver\windows\<arch> two levels up.
-          7z a "hushcore-driver-$env:GITHUB_REF_NAME-windows-testsigned.zip" `
+          7z a "hushcore-driver-$env:RELEASE_NAME-windows-testsigned.zip" `
               scripts\windows\install-driver.ps1 scripts\windows\uninstall-driver.ps1 dist\driver\windows | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: driver-windows
           path: hushcore-driver-*.zip
+          if-no-files-found: error
 
   macos-plugin:
     runs-on: macos-14
@@ -94,12 +131,13 @@ jobs:
       - name: Package
         run: |
           # Keep the repository layout: install-plugin.sh looks for dist/driver/macos two levels up.
-          zip -qry "hushcore-plugin-${GITHUB_REF_NAME}-macos-adhoc.zip" \
+          zip -qry "hushcore-plugin-${RELEASE_NAME}-macos-adhoc.zip" \
             scripts/macos/install-plugin.sh scripts/macos/uninstall-plugin.sh dist/driver/macos
       - uses: actions/upload-artifact@v4
         with:
           name: plugin-macos
           path: hushcore-plugin-*.zip
+          if-no-files-found: error
 
   publish:
     needs: [engine, windows-driver, macos-plugin]
@@ -108,6 +146,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches the engine version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)
+          if [ "v$version" != "$RELEASE_NAME" ]; then
+            echo "Tag $RELEASE_NAME does not match engine/Cargo.toml version $version" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -115,11 +161,23 @@ jobs:
       - name: Linux virtual-device files
         run: |
           # Keep the repository layout: install-virtual-mic.sh reads driver/linux two levels up.
-          zip -qr "artifacts/hushcore-virtual-mic-${GITHUB_REF_NAME}-linux.zip" driver/linux scripts/linux
+          zip -qr "artifacts/hushcore-virtual-mic-${RELEASE_NAME}-linux.zip" driver/linux scripts/linux
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          for f in *.zip; do unzip -tq "$f" > /dev/null || { echo "corrupt archive: $f" >&2; exit 1; }; done
+      - name: Keep the dry-run artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run
+          path: artifacts/
       - name: Draft release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          (cd artifacts && sha256sum * > SHA256SUMS)
-          gh release create "$GITHUB_REF_NAME" artifacts/* --draft --title "HushCore $GITHUB_REF_NAME" \
+          gh release create "$RELEASE_NAME" artifacts/* --draft --verify-tag --title "HushCore $RELEASE_NAME" \
             --notes "Engine binaries for Windows, macOS and Linux; the Windows driver (test-signed, needs attestation signing before public distribution); the macOS plug-in (ad-hoc signed, needs Developer ID signing and notarization); the Linux virtual-microphone files. Extract an archive and run its installer from the extracted folder, for example scripts/linux/install-virtual-mic.sh. See docs/SIGNING.md."
