@@ -15,7 +15,7 @@ use windows::Win32::Media::Audio::{eCapture, eRender, IAudioCaptureClient, IAudi
 use super::capture::{self, CaptureJob};
 use super::clients::{open_capture, open_render, InitKind, Opened, StreamMode};
 use super::devices::{resolve, Enumerator};
-use super::ring::frames_to_ms;
+use super::ring::{frames_to_ms, RingBounds};
 use super::render::{self, RenderJob};
 use crate::dsp::Metrics;
 use crate::ipc::{Event, Status};
@@ -28,6 +28,10 @@ pub const FAIL_MONITOR: u8 = 3;
 
 const STATUS_INTERVAL: Duration = Duration::from_millis(33);
 const THREAD_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Target fill in render periods, per mode. The sweeps (12 busy-loop processes, 60 s each): shared held zero
+/// steady-state underruns down to 0.0 and added latency with more; exclusive failed at 0.0 and held at 0.5.
+pub const RING_PREFILL_SHARED_PERIODS: f32 = 0.0;
+pub const RING_PREFILL_EXCLUSIVE_PERIODS: f32 = 0.5;
 const EXCLUSIVE_RATE_CHECK: Duration = Duration::from_millis(500);
 const EXCLUSIVE_RATE_TOLERANCE: f64 = 0.10;
 
@@ -74,6 +78,9 @@ pub struct Counts {
     pub capture_drops: AtomicU64,
     /// Render callbacks that dropped the oldest queued samples to bound latency.
     pub render_discards: AtomicU64,
+    /// Drift corrections (one sample skipped or held); deliberate, so not xruns.
+    pub slew_drops: AtomicU64,
+    pub slew_repeats: AtomicU64,
     pub discarded_frames: AtomicU64,
     /// Render callbacks that found the ring short and padded with silence.
     pub underruns: AtomicU64,
@@ -94,6 +101,8 @@ pub struct Diagnostics {
     pub discontinuities: u64,
     pub capture_drops: u64,
     pub render_discards: u64,
+    pub slew_drops: u64,
+    pub slew_repeats: u64,
     pub capture_packets: u64,
     pub render_callbacks: u64,
 }
@@ -132,6 +141,8 @@ impl Shared {
             discontinuities: c.discontinuities.load(Relaxed),
             capture_drops: c.capture_drops.load(Relaxed),
             render_discards: c.render_discards.load(Relaxed),
+            slew_drops: c.slew_drops.load(Relaxed),
+            slew_repeats: c.slew_repeats.load(Relaxed),
             capture_packets: c.capture_packets.load(Relaxed),
             render_callbacks: c.render_callbacks.load(Relaxed),
         }
@@ -159,8 +170,7 @@ pub struct Session {
     events: Sender<Event>,
     stopped_sent: Arc<AtomicBool>,
     rate: u32,
-    target_samples: usize,
-    max_samples: usize,
+    bounds: RingBounds,
     capture_ms: f32,
     render_ms: f32,
     capture_thread: Option<JoinHandle<()>>,
@@ -218,13 +228,15 @@ impl Session {
             _ => "shared",
         };
 
-        // Target = one render period of buffering, which is also the pre-fill. Overflow beyond `max` drops the oldest.
-        let target = ms_to_frames(render_ms, rate).max(1);
-        let max = target * 4 + ms_to_frames(capture_ms, rate).max(1);
-        let capacity = max * 2 + 1024;
+        // Target fill = one render period, which is also the pre-fill (see ring::RingBounds).
+        // The render start is gated on the first capture packet, which provides the cushion.
+        let prefill_periods = if mode_name == "exclusive" { RING_PREFILL_EXCLUSIVE_PERIODS } else { RING_PREFILL_SHARED_PERIODS };
+        let prefill = (ms_to_frames(render_ms, rate) as f32 * prefill_periods).round() as usize;
+        let bounds = RingBounds::new(prefill, ms_to_frames(capture_ms, rate));
+        let capacity = bounds.max * 2 + 1024;
         let (mut main_producer, main_consumer) = RingBuffer::<f32>::new(capacity);
         let (monitor_producer, monitor_consumer) = RingBuffer::<f32>::new(capacity);
-        for _ in 0..target {
+        for _ in 0..bounds.target {
             let _ = main_producer.push(0.0);
         }
 
@@ -247,8 +259,7 @@ impl Session {
             stop: shared.stop.clone(),
             is_main: true,
             muted: shared.mute_output,
-            target_samples: target,
-            max_samples: max,
+            bounds,
             ready: ready_tx,
         })?;
 
@@ -257,8 +268,7 @@ impl Session {
             events: events.clone(),
             stopped_sent: Arc::new(AtomicBool::new(false)),
             rate,
-            target_samples: target,
-            max_samples: max,
+            bounds,
             capture_ms,
             render_ms,
             capture_thread: Some(capture_thread),
@@ -285,12 +295,12 @@ impl Session {
         // An exclusive stream whose frames do not arrive at the negotiated rate would play at the wrong
         // speed, so it is replaced by a shared stream rather than announced as started.
         if mode_name == "exclusive" {
-            let measured = session.measure_frame_rate(EXCLUSIVE_RATE_CHECK);
-            let deviation = (measured / rate as f64 - 1.0).abs();
-            if deviation > EXCLUSIVE_RATE_TOLERANCE {
+            let (captured, rendered) = session.measure_frame_rates(EXCLUSIVE_RATE_CHECK);
+            let off = |measured: f64| (measured / rate as f64 - 1.0).abs() > EXCLUSIVE_RATE_TOLERANCE;
+            if off(captured) || off(rendered) {
                 let _ = events.send(Event::Error {
                     message: format!(
-                        "exclusive mode delivered {measured:.0} frames/s at {rate} Hz; using shared mode"
+                        "exclusive mode moved {captured:.0} frames/s in and {rendered:.0} frames/s out at {rate} Hz; using shared mode"
                     ),
                     fatal: false,
                 });
@@ -333,8 +343,7 @@ impl Session {
             stop: stop.clone(),
             is_main: false,
             muted: false,
-            target_samples: self.target_samples,
-            max_samples: self.max_samples,
+            bounds: self.bounds,
             ready: ready_tx,
         })?;
 
@@ -398,13 +407,19 @@ impl Session {
         }
     }
 
-    /// Frames per second the capture thread produced over `window`.
-    fn measure_frame_rate(&self, window: Duration) -> f64 {
-        let before = self.shared.proc_frames.load(Relaxed);
+    /// Frames per second the capture thread produced and the render thread consumed over `window`.
+    fn measure_frame_rates(&self, window: Duration) -> (f64, f64) {
+        let rendered = || {
+            self.shared.counts.rendered_frames.load(Relaxed) + self.shared.counts.silence_frames.load(Relaxed)
+        };
+        let captured_before = self.shared.proc_frames.load(Relaxed);
+        let rendered_before = rendered();
         let started = std::time::Instant::now();
         thread::sleep(window);
-        let frames = self.shared.proc_frames.load(Relaxed) - before;
-        frames as f64 / started.elapsed().as_secs_f64()
+        let secs = started.elapsed().as_secs_f64();
+        let captured = self.shared.proc_frames.load(Relaxed) - captured_before;
+        let out = rendered() - rendered_before;
+        (captured as f64 / secs, out as f64 / secs)
     }
 
     /// Tear down after a failed start without announcing `stopped`.

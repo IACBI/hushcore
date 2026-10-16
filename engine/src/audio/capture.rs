@@ -11,7 +11,7 @@ use anyhow::Result;
 use rtrb::Producer;
 use windows::Win32::Media::Audio::{IAudioCaptureClient, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT};
 
-use super::clients::Opened;
+use super::clients::{InitKind, Opened};
 use super::com::{buffer_slice, ComInit, MmcssGuard, MtaPayload, Wait};
 use super::format::{read_mono, StreamFormat};
 use super::session::{Controller, Shared, FAIL_CAPTURE};
@@ -47,6 +47,7 @@ fn run(job: CaptureJob) {
 
     let scratch = (job.opened.buffer_frames as usize).max(1);
     let mut processor = Processor {
+        packets: 0,
         format: job.opened.format,
         chain: Chain::new(job.opened.format.sample_rate),
         mono_in: vec![0.0; scratch],
@@ -66,6 +67,9 @@ fn run(job: CaptureJob) {
     }
     let _ = job.ready.send(Ok(()));
 
+    // Exclusive streams report a phantom packet right after each release (the device position shows
+    // only one new packet per event), so they are read one packet per event.
+    let single_packet = job.opened.init == InitKind::Exclusive;
     let mut failed = false;
     while !job.shared.stop.load(Relaxed) {
         match job.opened.event.wait(100) {
@@ -76,7 +80,7 @@ fn run(job: CaptureJob) {
                 break;
             }
         }
-        if drain(&job.service, &mut processor).is_err() {
+        if drain(&job.service, &mut processor, single_packet).is_err() {
             failed = true;
             break;
         }
@@ -89,7 +93,7 @@ fn run(job: CaptureJob) {
 }
 
 /// Pulls every queued packet. `Err` means the endpoint is gone or the client is unusable.
-fn drain(service: &IAudioCaptureClient, processor: &mut Processor) -> std::result::Result<(), ()> {
+fn drain(service: &IAudioCaptureClient, processor: &mut Processor, single_packet: bool) -> std::result::Result<(), ()> {
     loop {
         // SAFETY: plain query on the started capture client.
         let pending = unsafe { service.GetNextPacketSize() }.map_err(|_| ())?;
@@ -102,9 +106,11 @@ fn drain(service: &IAudioCaptureClient, processor: &mut Processor) -> std::resul
         // SAFETY: out pointers reference live locals; the buffer is released below on every path.
         unsafe { service.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.map_err(|_| ())?;
 
-        if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+        // The first packet after Start always carries the discontinuity flag; that is not an xrun.
+        if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && processor.packets > 0 {
             processor.shared.counts.discontinuities.fetch_add(1, Relaxed);
         }
+        processor.packets += 1;
         let frame_count = frames as usize;
         processor.shared.counts.capture_packets.fetch_add(1, Relaxed);
         if frame_count > 0 {
@@ -120,10 +126,14 @@ fn drain(service: &IAudioCaptureClient, processor: &mut Processor) -> std::resul
 
         // SAFETY: releases exactly the frames returned by GetBuffer.
         unsafe { service.ReleaseBuffer(frames) }.map_err(|_| ())?;
+        if single_packet {
+            return Ok(());
+        }
     }
 }
 
 struct Processor {
+    packets: u64,
     format: StreamFormat,
     chain: Chain,
     mono_in: Vec<f32>,

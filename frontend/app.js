@@ -56,6 +56,7 @@ let engineBusy = false;
 let engineState = null;
 let shownEngine = null;
 let shownXruns = null;
+let shownNotice = null;
 let isVstFailed = false;
 let armedDelete = null;
 let clipTimer = 0;
@@ -96,6 +97,8 @@ const dom = {
     monitorCheckbox: $('monitor-enabled-checkbox'),
     monitorSelect: $('monitor-device-select'),
     bufferSizeSelect: $('buffer-size-select'),
+    bufferSizeHint: $('buffer-size-hint'),
+    audioModeCheckbox: $('audio-mode-checkbox'),
 
     inputGainSlider: $('input-gain-slider'),
     inputGainVal: $('input-gain-val'),
@@ -765,15 +768,25 @@ function updateStatusStrip(m) {
     setText(dom.statusLatency, latency !== null ? `${Math.round(latency)} ms` : '-- ms');
     setText(dom.statusCpu, cpu !== null ? `CPU ${Math.round(Math.min(100, Math.max(0, cpu)))}%` : 'CPU --');
 
-    const engine = m.engine === 'native' ? 'native' : 'python';
-    if (engine !== shownEngine) {
-        shownEngine = engine;
-        const native = engine === 'native';
-        setText(dom.statusEngine, native ? 'NATIVE' : 'PYTHON');
+    const native = m.engine === 'native';
+    const exclusive = native && m.engine_mode === 'exclusive';
+    const engineKey = native ? (exclusive ? 'native-exclusive' : 'native-shared') : 'python';
+    if (engineKey !== shownEngine) {
+        shownEngine = engineKey;
+        const label = native ? `NATIVE · ${exclusive ? 'EXCLUSIVE' : 'SHARED'}` : 'PYTHON';
+        setText(dom.statusEngine, label);
         dom.statusEngine.classList.toggle('native', native);
         dom.statusEngine.title = native
-            ? 'Audio engine: native Rust engine'
+            ? `Audio engine: native Rust engine, ${exclusive ? 'exclusive' : 'shared'} mode`
             : 'Audio engine: Python engine (VST3 hosting and HQ AI)';
+        // The buffer size select only configures the Python engine.
+        dom.bufferSizeSelect.disabled = native;
+    }
+
+    const notice = typeof m.engine_notice === 'string' && m.engine_notice ? m.engine_notice : null;
+    if (notice !== shownNotice) {
+        shownNotice = notice;
+        if (notice) showToast(`${notice.charAt(0).toUpperCase()}${notice.slice(1)}`, 'info', 6000);
     }
 
     const xruns = Number.isFinite(m.xruns) ? Math.max(0, Math.trunc(m.xruns)) : 0;
@@ -807,6 +820,7 @@ function applySettingsToUI(cfg = settings) {
 
     if (cfg.vst_path !== undefined) dom.vstPathInput.value = cfg.vst_path || '';
     if (cfg.buffer_size !== undefined) dom.bufferSizeSelect.value = String(cfg.buffer_size);
+    if (cfg.audio_mode !== undefined) dom.audioModeCheckbox.checked = cfg.audio_mode === 'exclusive';
 
     updateActivePreset();
 }
@@ -1144,6 +1158,9 @@ function setupEventListeners() {
     dom.bufferSizeSelect.addEventListener('change', (e) => {
         sendConfigChange('buffer_size', e.target.value);
         showToast('Buffer size takes effect after the engine restarts (STOP, then START).', 'info', 5000);
+    });
+    dom.audioModeCheckbox.addEventListener('change', () => {
+        sendConfigChange('audio_mode', dom.audioModeCheckbox.checked ? 'exclusive' : 'shared');
     });
 
     for (const c of CHECK_CONTROLS) {

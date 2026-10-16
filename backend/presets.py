@@ -20,6 +20,7 @@ NON_DSP_KEYS = frozenset({
     "input_gain",
     "output_gain",
     "buffer_size",
+    "audio_mode",
     "vst_path",
 })
 DSP_KEYS = tuple(key for key in DEFAULT_SETTINGS if key not in NON_DSP_KEYS)

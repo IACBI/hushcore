@@ -101,10 +101,19 @@
                             </div>
                         </div>
 
+                        <div class="control-group">
+                            <label class="toggle">
+                                <input type="checkbox" id="audio-mode-checkbox" role="switch" aria-describedby="audio-mode-hint">
+                                <span class="track" aria-hidden="true"></span>
+                                <span class="toggle-label">Low-latency exclusive mode</span>
+                            </label>
+                            <span id="audio-mode-hint" class="cable-tip">Lowest latency. Other apps cannot use the selected devices while it is on.</span>
+                        </div>
+
                         <div class="control-group adv-only">
                             <label for="buffer-size-select">Latency buffer size</label>
                             <div class="select-wrapper">
-                                <select id="buffer-size-select" class="glow-select">
+                                <select id="buffer-size-select" class="glow-select" aria-describedby="buffer-size-hint">
                                     <option value="auto">Auto (driver negotiated)</option>
                                     <option value="64">64 samples (ultra low latency)</option>
                                     <option value="128">128 samples (low latency)</option>
@@ -112,6 +121,7 @@
                                     <option value="512">512 samples (high stability)</option>
                                 </select>
                             </div>
+                            <span id="buffer-size-hint" class="cable-tip">Applies to the Python engine only.</span>
                         </div>
 
                         <div class="control-group adv-only">

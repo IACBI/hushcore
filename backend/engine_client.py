@@ -16,6 +16,9 @@ import time
 logger = logging.getLogger("hushcore.engine")
 
 START_TIMEOUT_S = 5.0
+# After a non-fatal error during start, the engine may still announce started (exclusive falls back
+# to shared). Without a started event within this grace the start is treated as failed.
+START_ERROR_GRACE_S = 3.0
 STOP_TIMEOUT_S = 1.0
 DEVICES_TIMEOUT_S = 2.0
 STATUS_STALE_S = 1.0
@@ -25,7 +28,6 @@ TERMINATE_GRACE_S = 1.0
 SILENCE_DB = -120.0
 FFT_BINS = 64
 DEFAULT_SAMPLE_RATE = 48000
-START_MODE = "shared"
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -97,10 +99,11 @@ class NativeEngineClient:
     vst_plugin = None
     vst_failed = False
 
-    def __init__(self, settings, command, *, start_timeout=START_TIMEOUT_S):
+    def __init__(self, settings, command, *, start_timeout=START_TIMEOUT_S, start_error_grace=START_ERROR_GRACE_S):
         self.settings = settings
         self._command = list(command)
         self._start_timeout = start_timeout
+        self._start_error_grace = start_error_grace
 
         # _op_lock serializes start/stop/shutdown. _write_lock keeps command lines whole.
         # _cond guards the state below and wakes waiters when the reader thread sees an event.
@@ -115,6 +118,9 @@ class NativeEngineClient:
         self._stop_count = 0
         self._devices_reply = None
         self._last_error = None
+        self._start_error = None
+        self._start_error_at = None
+        self._engine_notice = None
         self._started = None
         self._status = None
         self._status_at = 0.0
@@ -200,6 +206,7 @@ class NativeEngineClient:
             status = dict(self._status or {})
             started = dict(self._started or {})
             xruns = self._xruns
+            notice = self._engine_notice
 
         sample_rate = status.get("sample_rate") or started.get("sample_rate") or DEFAULT_SAMPLE_RATE
         fft = status.get("fft_data") or [0.0] * FFT_BINS
@@ -218,6 +225,8 @@ class NativeEngineClient:
             "clipping": bool(status.get("clipping", False)),
             "engine": "native",
             "xruns": int(xruns),
+            "engine_mode": (started.get("mode") if running else None) or "shared",
+            "engine_notice": notice,
         }
 
     def show_vst_editor(self):
@@ -240,6 +249,9 @@ class NativeEngineClient:
 
         with self._cond:
             self._start_result = None
+            self._start_error = None
+            self._start_error_at = None
+            self._engine_notice = None
         cfg = dict(self.settings)
         command = {
             "cmd": "start",
@@ -247,28 +259,34 @@ class NativeEngineClient:
             "output": str(cfg.get("output_device", "") or ""),
             "monitor": str(cfg.get("monitor_device", "") or ""),
             "monitor_enabled": bool(cfg.get("monitor_enabled", False)),
-            "mode": START_MODE,
+            "mode": "exclusive" if cfg.get("audio_mode") == "exclusive" else "shared",
             "settings": cfg,
         }
         if not self._send(command):
             self._teardown()
             return False
 
-        with self._cond:
-            self._cond.wait_for(lambda: self._start_result is not None or self._eof, timeout=self._start_timeout)
-            result = self._start_result
-            eof = self._eof
-
-        if result is None:
-            reason = "engine exited before starting" if eof else f"no started event within {self._start_timeout:g} s"
-        elif not result[0]:
-            reason = result[1]
-        else:
+        ok, reason = self._await_start()
+        if ok:
             return True
-
         logger.warning("Native engine did not start: %s", reason)
         self._teardown()
         return False
+
+    def _await_start(self):
+        deadline = time.monotonic() + self._start_timeout
+        with self._cond:
+            while True:
+                if self._start_result is not None:
+                    return self._start_result
+                if self._eof:
+                    return False, "engine exited before starting"
+                now = time.monotonic()
+                if self._start_error_at is not None and now - self._start_error_at >= self._start_error_grace:
+                    return False, self._start_error
+                if now >= deadline:
+                    return False, f"no started event within {self._start_timeout:g} s"
+                self._cond.wait(timeout=min(0.05, deadline - now))
 
     def _ensure_process(self):
         with self._cond:
@@ -304,6 +322,7 @@ class NativeEngineClient:
             self._start_result = None
             self._devices_reply = None
             self._last_error = None
+            self._engine_notice = None
             self._status = None
             self._started = None
             self._status_at = 0.0
@@ -473,13 +492,17 @@ class NativeEngineClient:
                 message = str(event.get("message", "unknown error"))
                 fatal = bool(event.get("fatal", False))
                 self._last_error = message
-                if self._start_result is None:
-                    self._start_result = (False, message)
                 if fatal:
+                    if self._start_result is None:
+                        self._start_result = (False, message)
                     self._running = False
                     logger.error("Native engine fatal error: %s", message)
                 else:
-                    logger.warning("Native engine error: %s", message)
+                    self._engine_notice = message
+                    if self._start_result is None:
+                        self._start_error = message
+                        self._start_error_at = time.monotonic()
+                    logger.warning("Native engine notice: %s", message)
             elif kind == "ready":
                 logger.info("Native engine ready (version %s)", event.get("version"))
             self._cond.notify_all()

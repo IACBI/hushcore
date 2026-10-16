@@ -198,7 +198,9 @@ fn open_exclusive(device: &IMMDevice, rate: Option<u32>) -> Result<Opened> {
 /// First exclusive format the device accepts at `rate`, preferring float and then wider integers.
 fn pick_exclusive_format(client: &IAudioClient, rate: u32, channels: u16) -> Result<StreamFormat> {
     use super::format::SampleKind::{F32, I16, I24, I32};
-    for kind in [F32, I32, I24, I16] {
+    // 16-bit first: the 24-bit render format got a 4 ms periodicity that this driver did not honour (it fired
+    // every 3 ms), which made exclusive output run at 4/3 speed.
+    for kind in [I16, I24, I32, F32] {
         let candidate = StreamFormat { sample_rate: rate, channels, kind };
         let wfx = candidate.to_waveformatex();
         // SAFETY: `wfx` is a valid WAVEFORMATEX for the call; no closest-match out pointer is requested.

@@ -267,13 +267,15 @@ fn selftest_cmd(args: &[String]) -> Result<()> {
         diag.xruns(),
     );
     println!(
-        "selftest: underruns={} discontinuities={} capture_drops={} render_discards={} \
+        "selftest: underruns={} discontinuities={} capture_drops={} render_discards={} slew_drops={} slew_repeats={} \
          produced_frames={} rendered_frames={} silence_frames={} discarded_frames={} status_events={} \
          capture_packets={} render_callbacks={}",
         diag.underruns,
         diag.discontinuities,
         diag.capture_drops,
         diag.render_discards,
+        diag.slew_drops,
+        diag.slew_repeats,
         diag.produced_frames,
         diag.rendered_frames,
         diag.silence_frames,

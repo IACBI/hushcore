@@ -58,7 +58,10 @@ DEFAULT_SETTINGS = {
     "vst_path": "",
 
     # Latency Tuning
-    "buffer_size": "auto"
+    "buffer_size": "auto",
+
+    # Native engine stream mode; the Python engine ignores it
+    "audio_mode": "shared",
 }
 
 # Numeric keys carry min/max; enum keys carry choices. Booleans and strings
@@ -85,6 +88,7 @@ SCHEMA = {
     "exciter_amount": {"min": 0.0, "max": 1.0},
     "exciter_mix": {"min": 0.0, "max": 1.0},
     "buffer_size": {"choices": ("auto", "64", "128", "256", "512")},
+    "audio_mode": {"choices": ("shared", "exclusive")},
 }
 
 MAX_STRING_LENGTH = 512

@@ -20,6 +20,7 @@ ENGINE_STATUS_KEYS = {
     "input_rms", "output_rms", "gate_state", "fft_data", "is_running",
     "df_available", "vst_loaded", "vst_failed", "sample_rate",
     "latency_ms", "cpu_load", "clipping", "engine", "xruns",
+    "engine_mode", "engine_notice",
 }
 
 
@@ -41,7 +42,7 @@ def command_log(tmp_path, monkeypatch):
 def make_client():
     clients = []
 
-    def factory(settings=None, start_timeout=3.0):
+    def factory(settings=None, start_timeout=3.0, start_error_grace=0.3):
         if settings is None:
             settings = {
                 "input_device": "Fake Mic",
@@ -50,7 +51,12 @@ def make_client():
                 "monitor_enabled": False,
                 "gate_release_ms": 150.0,
             }
-        client = NativeEngineClient(settings, [sys.executable, "-u", FAKE_ENGINE], start_timeout=start_timeout)
+        client = NativeEngineClient(
+            settings,
+            [sys.executable, "-u", FAKE_ENGINE],
+            start_timeout=start_timeout,
+            start_error_grace=start_error_grace,
+        )
         clients.append(client)
         return client
 
@@ -145,6 +151,74 @@ def test_settings_and_monitor_reach_the_engine(make_client, command_log):
     assert commands[1]["settings"]["gate_release_ms"] == 500.0
     assert commands[2] == {"cmd": "monitor", "enabled": True, "device": "Fake Speakers"}
     assert commands[3] == {"cmd": "monitor", "enabled": False, "device": "Fake Speakers"}
+
+
+def test_default_start_requests_shared_mode(make_client, command_log):
+    client = make_client()
+    assert client.start() is True
+    status = client.get_status()
+    assert status["engine_mode"] == "shared"
+    assert status["engine_notice"] is None
+    client.shutdown()
+    start = read_log(command_log)[0]
+    assert start["cmd"] == "start"
+    assert start["mode"] == "shared"
+
+
+def test_exclusive_request_reports_engine_mode_and_no_notice(make_client, command_log):
+    settings = {"input_device": "__exclusive_ok__", "output_device": "", "monitor_device": "",
+                "monitor_enabled": False, "audio_mode": "exclusive"}
+    client = make_client(settings)
+    assert client.start() is True
+    status = client.get_status()
+    assert status["engine_mode"] == "exclusive"
+    assert status["engine_notice"] is None
+    client.shutdown()
+    assert read_log(command_log)[0]["mode"] == "exclusive"
+
+
+def test_exclusive_fallback_keeps_start_and_reports_shared_with_notice(make_client, command_log):
+    settings = {"input_device": "Fake Mic", "output_device": "", "monitor_device": "",
+                "monitor_enabled": False, "audio_mode": "exclusive"}
+    client = make_client(settings)
+    assert client.start() is True
+    status = client.get_status()
+    assert status["is_running"] is True
+    assert status["engine_mode"] == "shared"
+    assert "using shared mode" in status["engine_notice"]
+    client.shutdown()
+    assert read_log(command_log)[0]["mode"] == "exclusive"
+
+
+def test_runtime_notice_keeps_engine_running(make_client):
+    settings = {"input_device": "__notice__", "output_device": "", "monitor_device": "", "monitor_enabled": False}
+    client = make_client(settings)
+    assert client.start() is True
+    assert wait_for(lambda: client.get_status()["engine_notice"] is not None)
+    assert client.is_running() is True
+    assert client.get_status()["engine_notice"] == "monitor output device lost"
+    client.shutdown()
+
+
+def test_notice_is_cleared_by_the_next_start(make_client):
+    settings = {"input_device": "__notice__", "output_device": "", "monitor_device": "", "monitor_enabled": False}
+    client = make_client(settings)
+    assert client.start() is True
+    assert wait_for(lambda: client.get_status()["engine_notice"] is not None)
+    client.stop()
+    settings["input_device"] = "Fake Mic"
+    assert client.start() is True
+    assert client.get_status()["engine_notice"] is None
+    client.shutdown()
+
+
+def test_error_without_started_fails_after_the_grace_period(make_client):
+    settings = {"input_device": "__error__", "output_device": "", "monitor_device": "", "monitor_enabled": False}
+    client = make_client(settings, start_timeout=10.0, start_error_grace=0.3)
+    began = time.monotonic()
+    assert client.start() is False
+    assert time.monotonic() - began < 3
+    client.shutdown()
 
 
 def test_stop_when_idle_does_not_launch_the_engine(make_client, command_log):

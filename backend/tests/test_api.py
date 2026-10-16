@@ -22,7 +22,7 @@ STATUS_KEYS = {
     "latency_ms", "cpu_load", "clipping",
 }
 # The WebSocket frame adds the active engine name and its xrun count to the engine's status.
-WS_KEYS = STATUS_KEYS | {"engine", "xruns"}
+WS_KEYS = STATUS_KEYS | {"engine", "xruns", "engine_mode", "engine_notice"}
 
 FAKE_ENGINE = os.path.join(BACKEND_DIR, "tests", "fake_engine.py")
 
@@ -315,6 +315,8 @@ def test_websocket_auth_ok_then_metrics_frame(api, app_env):
         assert set(metrics) == WS_KEYS
         assert metrics["engine"] == "python"
         assert metrics["xruns"] == 0
+        assert metrics["engine_mode"] == "shared"
+        assert metrics["engine_notice"] is None
 
 
 def test_websocket_survives_bad_messages_and_applies_settings(api, app_env):
@@ -437,3 +439,47 @@ def test_enabling_vst_moves_running_native_engine_to_python_and_back(native_api,
     assert api.post("/api/settings", json={"key": "vst_enabled", "value": False}).status_code == 200
     assert api.get("/api/engine").json()["active"] == "native"
     assert app_env.processor.is_running() is True
+
+
+def test_audio_mode_defaults_to_shared(api):
+    assert api.get("/api/settings").json()["audio_mode"] == "shared"
+
+
+def test_audio_mode_accepts_only_shared_or_exclusive(api):
+    assert api.post("/api/settings", json={"key": "audio_mode", "value": "turbo"}).status_code == 400
+    assert api.post("/api/settings", json={"key": "audio_mode", "value": 1}).status_code == 400
+    resp = api.post("/api/settings", json={"key": "audio_mode", "value": "exclusive"})
+    assert resp.status_code == 200
+    assert resp.json()["settings"]["audio_mode"] == "exclusive"
+
+
+def test_audio_mode_is_not_carried_by_presets(app_env):
+    assert "audio_mode" not in presets.DSP_KEYS
+    assert "audio_mode" not in presets.snapshot_dsp(app_env.settings)
+
+
+def test_audio_mode_change_while_stopped_does_not_start_engine(api, app_env):
+    assert api.post("/api/settings", json={"key": "audio_mode", "value": "exclusive"}).status_code == 200
+    assert "start" not in app_env.processor.calls
+
+
+def test_audio_mode_change_while_running_restarts_pipeline(api, app_env):
+    assert api.post("/api/start").status_code == 200
+    app_env.processor.calls.clear()
+    assert api.post("/api/settings", json={"key": "audio_mode", "value": "exclusive"}).status_code == 200
+    assert app_env.processor.calls == ["stop", "update_settings", "start"]
+
+
+def test_native_exclusive_fallback_is_reported_on_websocket(native_api, api, app_env):
+    assert api.post("/api/settings", json={"key": "audio_mode", "value": "exclusive"}).status_code == 200
+    assert api.post("/api/engine", json={"engine": "native"}).json()["active"] == "native"
+    assert api.post("/api/start").status_code == 200
+    with api.websocket_connect("/ws") as ws:
+        ws.send_text(_auth_message(app_env.API_KEY))
+        assert json.loads(ws.receive_text()) == {"action": "auth_ok"}
+        metrics = json.loads(ws.receive_text())
+    assert set(metrics) == WS_KEYS
+    assert metrics["engine"] == "native"
+    assert metrics["engine_mode"] == "shared"
+    assert "using shared mode" in metrics["engine_notice"]
+    assert api.post("/api/stop").status_code == 200

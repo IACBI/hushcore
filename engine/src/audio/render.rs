@@ -14,7 +14,7 @@ use super::clients::{InitKind, Opened};
 use super::com::{buffer_slice, ComInit, MmcssGuard, MtaPayload, Wait};
 use super::format::{write_mono, StreamFormat};
 use super::clients::SILENT_FLAG;
-use super::ring::{plan_render, smooth};
+use super::ring::{plan_render, smooth, RingBounds};
 use super::session::{Shared, FAIL_MONITOR, FAIL_RENDER};
 
 pub struct RenderJob {
@@ -25,8 +25,7 @@ pub struct RenderJob {
     pub stop: Arc<AtomicBool>,
     pub is_main: bool,
     pub muted: bool,
-    pub target_samples: usize,
-    pub max_samples: usize,
+    pub bounds: RingBounds,
     pub ready: Sender<Result<(), String>>,
 }
 
@@ -41,7 +40,7 @@ pub fn spawn(job: RenderJob) -> Result<JoinHandle<Consumer<f32>>> {
 }
 
 fn run(job: RenderJob) -> Consumer<f32> {
-    let RenderJob { opened, service, mut consumer, shared, stop, is_main, muted, target_samples, max_samples, ready } = job;
+    let RenderJob { opened, service, mut consumer, shared, stop, is_main, muted, bounds, ready } = job;
     let _com = match ComInit::new() {
         Ok(c) => c,
         Err(e) => {
@@ -72,8 +71,7 @@ fn run(job: RenderJob) -> Consumer<f32> {
         muted: muted && is_main,
         format,
         buffer_frames,
-        target: target_samples,
-        max: max_samples,
+        bounds,
         fill_frames: 0.0,
         exclusive: opened.init == InitKind::Exclusive,
     };
@@ -82,6 +80,17 @@ fn run(job: RenderJob) -> Consumer<f32> {
     if let Err(e) = renderer.prefill_silence() {
         let _ = ready.send(Err(format!("render prefill failed: {e}")));
         return renderer.into_consumer();
+    }
+    // Start only once capture has delivered audio, so the first callbacks do not find an empty ring.
+    if is_main {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // proc_frames moves only after a whole packet is in the ring, unlike capture_packets.
+        while shared.proc_frames.load(Relaxed) == 0
+            && !stop.load(Relaxed)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
     // SAFETY: the client is initialised on the control thread and started exactly once here.
     if let Err(e) = unsafe { renderer.client.Start() } {
@@ -130,8 +139,7 @@ struct Renderer {
     muted: bool,
     format: StreamFormat,
     buffer_frames: u32,
-    target: usize,
-    max: usize,
+    bounds: RingBounds,
     fill_frames: f32,
     exclusive: bool,
 }
@@ -171,7 +179,7 @@ impl Renderer {
         }
 
         let queued = self.consumer.slots();
-        let plan = plan_render(queued, wanted, self.target, self.max);
+        let plan = plan_render(queued, wanted, self.bounds);
         if self.is_main {
             self.shared.counts.render_callbacks.fetch_add(1, Relaxed);
         }
@@ -183,6 +191,15 @@ impl Renderer {
                 self.shared.counts.render_discards.fetch_add(1, Relaxed);
                 self.shared.counts.discarded_frames.fetch_add(plan.discard as u64, Relaxed);
             }
+        }
+        if plan.slew_drop > 0 {
+            let _ = self.consumer.pop();
+            if self.is_main {
+                self.shared.counts.slew_drops.fetch_add(1, Relaxed);
+            }
+        }
+        if plan.repeat > 0 && self.is_main {
+            self.shared.counts.slew_repeats.fetch_add(1, Relaxed);
         }
         if self.is_main {
             if plan.underrun() {
@@ -207,6 +224,11 @@ impl Renderer {
                     write_mono(&mut dst[..split], first, &self.format);
                     write_mono(&mut dst[split..plan.take * frame_bytes], second, &self.format);
                     written = plan.take;
+                    if plan.repeat > 0 {
+                        let last = second.last().or(first.last()).copied().unwrap_or(0.0);
+                        write_mono(&mut dst[written * frame_bytes..(written + 1) * frame_bytes], &[last], &self.format);
+                        written += 1;
+                    }
                 }
                 chunk.commit_all();
             }

@@ -263,6 +263,12 @@ def apply_setting(key, value, *, persist=True):
         # Process device restarts or toggle monitoring
         if key in ["input_device", "output_device"]:
             _restart_active_engine()
+        elif key == "audio_mode":
+            # Only a running pipeline needs the new stream mode; a stopped one picks it up on START.
+            if processor.running.is_set():
+                _restart_active_engine()
+            else:
+                processor.update_settings(settings)
         elif key == "vst_enabled":
             _reconcile_engine()
             processor.update_settings(settings)
@@ -409,8 +415,10 @@ def build_metrics():
             "vst_failed": current.vst_failed
         }
     status.setdefault("engine", _engine_name(current))
-    # The Python engine has no xrun counter; it reports 0.
+    # The Python engine has no xrun counter, ignores audio_mode and never has a notice.
     status.setdefault("xruns", getattr(current, "xruns", 0))
+    status.setdefault("engine_mode", "shared")
+    status.setdefault("engine_notice", None)
     return status
 
 async def _handle_ws_message(raw):

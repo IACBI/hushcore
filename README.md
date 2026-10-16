@@ -25,7 +25,8 @@ Everything runs on your machine. Audio is processed frame by frame on the CPU an
 - **Studio FX rack**: noise gate, 3-band EQ, compressor, de-esser, harmonic vocal exciter and peak limiter.
 - **VST3 host**: load any `.vst3` plugin through [pedalboard](https://github.com/spotify/pedalboard) and open its own editor from the dashboard.
 - **Presets**: four built-in presets, plus your own saved to `backend/user_presets.json`.
-- **Latency control**: buffer size of 64, 128, 256 or 512 samples, or `auto` to let the driver decide.
+- **Native audio engine**: a real-time Rust engine (WASAPI, about 1% CPU) runs the chain when it is built, and the Python engine takes over for VST3 or when the native one is missing. On our test PC (Realtek, shared mode limited to 10 ms) end-to-end latency was about 35 ms shared and 17 ms in the optional **exclusive mode**, against 54 ms with the Python engine. Your numbers depend on the audio driver.
+- **Latency control** (Python engine): buffer size of 64, 128, 256 or 512 samples, or `auto`.
 - **Live status**: sample rate, estimated latency, CPU load, input and output meters, gate state and a clip indicator, with a spectrum, pulse or 3D cascade visualizer.
 - **Easy and Advanced views**: Easy shows presets and two sliders; Advanced shows the full FX rack.
 - **Tray icon**: start or stop the engine, open the dashboard or exit, from the notification area.
@@ -36,6 +37,7 @@ Everything runs on your machine. Audio is processed frame by frame on the CPU an
 - Python 3.10 or newer, on `PATH`.
 - Node.js 20.19 or newer, only to build the dashboard. If `backend\static\index.html` already exists, the build is skipped and Node is not needed.
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) to pass the processed audio to other apps.
+- Optional, for the native engine: [Rust](https://rustup.rs/) (stable). Without it HushCore uses the Python engine.
 - Optional, for HQ AI: PyTorch and DeepFilterNet, which is a large download. HQ AI runs only at 48 kHz; at other sample rates it uses Eco DSP.
 
 ### Installation
@@ -50,8 +52,9 @@ It does the following:
 
 1. Builds the dashboard into `backend\static`. This happens only when that folder is missing or you pass `--rebuild`.
 2. Creates `venv` and installs `backend\requirements.txt`. Packages are installed again only when that file changes.
-3. If DeepFilterNet is not installed, asks once whether to install the HQ AI components.
-4. Starts the backend and opens `http://127.0.0.1:8000`.
+3. Builds the native engine with `cargo` if Rust is installed and no engine binary exists yet. Without Rust it continues with the Python engine.
+4. If DeepFilterNet is not installed, asks once whether to install the HQ AI components.
+5. Starts the backend and opens `http://127.0.0.1:8000`.
 
 | Option | Effect |
 | --- | --- |
@@ -96,10 +99,11 @@ Set these environment variables before running `run.bat`:
 | --- | --- | --- |
 | `HUSHCORE_PORT` | `8000` | Port for the dashboard and API. Invalid values fall back to 8000. |
 | `HUSHCORE_NO_BROWSER` | unset | Set to `1` to keep HushCore from opening a browser window at start. |
+| `HUSHCORE_ENGINE` | `auto` | `auto` uses the native engine when available, `native` or `python` forces one. Switchable in the dashboard under Advanced. |
 
 Settings are stored in `backend\settings.json` and your presets in `backend\user_presets.json`. Both files are git-ignored. Delete either one to reset it.
 
-Buffer size takes effect when the engine starts. After changing it, click **STOP**, then **START**. Smaller buffers lower latency; larger ones give more stability.
+**Exclusive mode** (the **Low-latency exclusive mode** switch) gives the lowest latency, but other apps cannot use the selected devices while it is on. If the device does not support it, HushCore falls back to shared mode and says so. The buffer size setting applies to the Python engine only and takes effect when the engine starts.
 
 Requests to `/api` must send the per-session key in an `X-API-Key` header. `/api/health` is public.
 
@@ -111,12 +115,13 @@ Run `run.bat` once first; it creates `venv`. Then, in a terminal:
 venv\Scripts\activate
 pip install -r backend/requirements-dev.txt
 python -m pytest backend/tests -q
+cargo test --release --manifest-path engine/Cargo.toml
 cd frontend
 npm install
 npm run dev
 ```
 
-`npm run dev` serves the dashboard on `http://127.0.0.1:3000` with hot reload, for layout work only. It has no API proxy and the API key comes only from the backend, so its controls cannot reach the backend. For end-to-end testing, run `run.bat --rebuild` and use port 8000. CI runs the backend tests on Python 3.10 and 3.12 and builds the dashboard on every push and pull request.
+`npm run dev` serves the dashboard on `http://127.0.0.1:3000` with hot reload, for layout work only. It has no API proxy and the API key comes only from the backend, so its controls cannot reach the backend. For end-to-end testing, run `run.bat --rebuild` and use port 8000. CI runs the backend tests on Python 3.10 and 3.12, builds the dashboard and builds and tests the engine on every push and pull request. The engine's JSON-lines control protocol is documented in `engine/PROTOCOL.md`.
 
 ### License
 
@@ -140,7 +145,8 @@ Her şey kendi bilgisayarınızda çalışır. Ses kare kare CPU üzerinde işle
 - **Studio FX rafı**: gürültü kapısı (gate), 3 bantlı EQ, kompresör, de-esser, harmonik vokal exciter ve tepe sınırlayıcı (limiter).
 - **VST3 barındırma**: herhangi bir `.vst3` eklentisini [pedalboard](https://github.com/spotify/pedalboard) ile yükleyin ve eklentinin kendi editörünü panelden açın.
 - **Hazır ayarlar**: dört yerleşik ön ayar ve kendi kaydettiğiniz ayarlar (`backend/user_presets.json`).
-- **Gecikme kontrolü**: 64, 128, 256 veya 512 örneklik tampon boyutu ya da sürücünün seçmesi için `auto`.
+- **Yerel ses motoru**: derlendiğinde zinciri gerçek zamanlı bir Rust motoru (WASAPI, yaklaşık %1 CPU) çalıştırır; VST3 kullanıldığında ya da yerel motor yoksa Python motoru devralır. Test bilgisayarımızda (Realtek, paylaşımlı mod 10 ms ile sınırlı) uçtan uca gecikme paylaşımlı modda yaklaşık 35 ms, isteğe bağlı **exclusive modda** 17 ms oldu; Python motorunda 54 ms. Sizin değerleriniz ses sürücüsüne bağlıdır.
+- **Gecikme kontrolü** (Python motoru): 64, 128, 256 veya 512 örneklik tampon boyutu ya da `auto`.
 - **Canlı durum**: örnekleme hızı, tahmini gecikme, CPU yükü, giriş ve çıkış ölçerleri, gate durumu, kırpma göstergesi ve spektrum, pulse ya da 3D cascade görselleştiricisi.
 - **Easy ve Advanced görünümleri**: Easy'de hazır ayarlar ile iki kaydırıcı, Advanced'de tüm FX rafı bulunur.
 - **Tepsi simgesi**: bildirim alanından motoru başlatıp durdurun, paneli açın ya da uygulamadan çıkın.
@@ -151,6 +157,7 @@ Her şey kendi bilgisayarınızda çalışır. Ses kare kare CPU üzerinde işle
 - Python 3.10 veya daha yeni, `PATH` içinde.
 - Node.js 20.19 veya daha yeni; yalnızca paneli derlemek için gerekir. `backend\static\index.html` zaten varsa derleme atlanır ve Node gerekmez.
 - İşlenmiş sesi diğer uygulamalara aktarmak için [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
+- İsteğe bağlı, yerel motor için: [Rust](https://rustup.rs/) (stable). Rust yoksa HushCore Python motorunu kullanır.
 - İsteğe bağlı HQ AI için PyTorch ve DeepFilterNet; büyük bir indirmedir. HQ AI yalnızca 48 kHz'de çalışır, diğer örnekleme hızlarında Eco DSP kullanılır.
 
 ### Kurulum
@@ -165,8 +172,9 @@ Bu dosya şunları yapar:
 
 1. Paneli `backend\static` klasörüne derler. Bu yalnızca klasör yoksa ya da `--rebuild` verildiğinde yapılır.
 2. `venv` sanal ortamını oluşturur ve `backend\requirements.txt` dosyasını kurar. Paketler yalnızca bu dosya değiştiğinde yeniden kurulur.
-3. DeepFilterNet kurulu değilse HQ AI bileşenlerini kurmak isteyip istemediğinizi bir kez sorar.
-4. Backend'i başlatır ve `http://127.0.0.1:8000` adresini açar.
+3. Rust kuruluysa ve henüz motor ikilisi yoksa yerel motoru `cargo` ile derler. Rust yoksa Python motoruyla devam eder.
+4. DeepFilterNet kurulu değilse HQ AI bileşenlerini kurmak isteyip istemediğinizi bir kez sorar.
+5. Backend'i başlatır ve `http://127.0.0.1:8000` adresini açar.
 
 | Seçenek | Etkisi |
 | --- | --- |
@@ -211,10 +219,11 @@ Physical mic -> HushCore -> CABLE Input
 | --- | --- | --- |
 | `HUSHCORE_PORT` | `8000` | Panel ve API portu. Geçersiz değerler 8000'e döner. |
 | `HUSHCORE_NO_BROWSER` | tanımsız | Başlangıçta tarayıcının açılmasını engellemek için `1` yapın. |
+| `HUSHCORE_ENGINE` | `auto` | `auto` varsa yerel motoru kullanır; `native` ya da `python` birini zorlar. Panelde Advanced altından da değiştirilebilir. |
 
 Ayarlar `backend\settings.json`, kendi ön ayarlarınız `backend\user_presets.json` dosyasında saklanır. İki dosya da Git tarafından yok sayılır; birini silmek onu sıfırlar.
 
-Tampon boyutu motor başlatıldığında uygulanır. Değiştirdikten sonra **STOP**, ardından **START** düğmesine basın. Küçük tampon gecikmeyi düşürür, büyük tampon kararlılığı artırır.
+**Exclusive mod** (**Low-latency exclusive mode** anahtarı) en düşük gecikmeyi verir, ancak açıkken seçili aygıtları başka uygulamalar kullanamaz. Aygıt desteklemiyorsa HushCore paylaşımlı moda döner ve bunu bildirir. Tampon boyutu ayarı yalnızca Python motoru için geçerlidir ve motor başlatıldığında uygulanır.
 
 `/api` altındaki istekler oturuma özel anahtarı `X-API-Key` başlığında göndermelidir. `/api/health` herkese açıktır.
 
@@ -226,12 +235,13 @@ Tampon boyutu motor başlatıldığında uygulanır. Değiştirdikten sonra **ST
 venv\Scripts\activate
 pip install -r backend/requirements-dev.txt
 python -m pytest backend/tests -q
+cargo test --release --manifest-path engine/Cargo.toml
 cd frontend
 npm install
 npm run dev
 ```
 
-`npm run dev` paneli `http://127.0.0.1:3000` adresinde canlı yenilemeyle açar, ancak yalnızca arayüz çalışması içindir. API proxy'si yoktur ve API anahtarını yalnızca backend sağlar; bu yüzden kontroller backend'e ulaşamaz. Uçtan uca test için `run.bat --rebuild` çalıştırıp 8000 portunu kullanın. CI, her push ve pull request'te backend testlerini Python 3.10 ve 3.12 ile çalıştırır ve paneli derler.
+`npm run dev` paneli `http://127.0.0.1:3000` adresinde canlı yenilemeyle açar, ancak yalnızca arayüz çalışması içindir. API proxy'si yoktur ve API anahtarını yalnızca backend sağlar; bu yüzden kontroller backend'e ulaşamaz. Uçtan uca test için `run.bat --rebuild` çalıştırıp 8000 portunu kullanın. CI, her push ve pull request'te backend testlerini Python 3.10 ve 3.12 ile çalıştırır, paneli derler, motoru derleyip test eder. Motorun JSON-lines kontrol protokolü `engine/PROTOCOL.md` içinde belgelidir.
 
 ### Lisans
 

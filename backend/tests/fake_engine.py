@@ -8,6 +8,11 @@ Magic input device names select failure modes:
   __garbage__  an unparsable line is written before started
   __xrun__     each status event increments xruns
   __deaf__     start succeeds, then the process ignores every command and EOF
+  __exclusive_ok__  an exclusive start succeeds and reports mode "exclusive"
+  __notice__   start succeeds and a non-fatal runtime error follows started
+
+An exclusive start on any other device emits a non-fatal fallback error and then started with
+mode "shared", like the real engine does when the device refuses exclusive mode.
 
 Every command received is appended as one JSON line to $HUSHCORE_FAKE_ENGINE_LOG when that
 variable is set, so tests can check what the backend sent.
@@ -76,10 +81,18 @@ def start(command):
         return
     if device == "__garbage__":
         _write("this is not json")
+    mode = "shared"
+    if command.get("mode") == "exclusive":
+        if device == "__exclusive_ok__":
+            mode = "exclusive"
+        else:
+            emit("error", message="exclusive mode unavailable (fake device); using shared mode", fatal=False)
     _state["running"] = True
     _state["silent"] = device == "__silent__"
     _state["xrun"] = device == "__xrun__"
-    emit("started", sample_rate=48000, mode="shared", input_period_ms=5.0, output_period_ms=5.0, latency_ms=10.0)
+    emit("started", sample_rate=48000, mode=mode, input_period_ms=5.0, output_period_ms=5.0, latency_ms=10.0)
+    if device == "__notice__":
+        emit("error", message="monitor output device lost", fatal=False)
     if device == "__crash__":
         threading.Timer(0.3, lambda: os._exit(3)).start()
     if device == "__deaf__":
