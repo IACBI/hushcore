@@ -218,11 +218,10 @@ fn selftest_cmd(args: &[String]) -> Result<()> {
     for event in rx.try_iter() {
         tally.absorb(event);
     }
-    for message in control_rx.try_iter() {
-        if let Inbound::DeviceLost { reason, .. } = message {
-            tally.errors.push(reason);
-        }
-    }
+    let lost: Vec<String> = control_rx
+        .try_iter()
+        .filter_map(|message| if let Inbound::DeviceLost { reason, .. } = message { Some(reason) } else { None })
+        .collect();
 
     let (sample_rate, mode_name, input_ms, output_ms, started_latency) =
         tally.started.ok_or_else(|| anyhow!("engine never reported started"))?;
@@ -256,6 +255,10 @@ fn selftest_cmd(args: &[String]) -> Result<()> {
     );
     for message in &tally.errors {
         println!("selftest error event: {message}");
+    }
+    // The stream died part-way, so the numbers above do not describe a full run.
+    if !lost.is_empty() {
+        return Err(anyhow!("selftest failed: {}", lost.join("; ")));
     }
     Ok(())
 }

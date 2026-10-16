@@ -380,12 +380,33 @@ def test_virtual_device_not_installed_is_reported_as_such(make_client):
     }
 
 
+def test_virtual_device_is_asked_again_on_every_call(make_client, monkeypatch):
+    client = make_client()
+    assert client.start() is True
+    calls = []
+    real = client._engine_devices
+    monkeypatch.setattr(client, "_engine_devices", lambda: calls.append(1) or real())
+    client.virtual_device()
+    client.virtual_device()
+    assert len(calls) == 2
+
+
 def test_get_devices_uses_sounddevice_listing_without_launching_engine(make_client, monkeypatch):
     listing = {"inputs": [{"name": "Mic [MME]"}], "outputs": [{"name": "Speakers [MME]"}]}
+    monkeypatch.setattr(engine_client, "portaudio_names_match_engine", lambda: True)
     monkeypatch.setattr(engine_client, "list_sounddevice_devices", lambda: listing)
     client = make_client()
     assert client.get_devices() == listing
     assert client._proc is None
+
+
+def test_get_devices_uses_the_engine_list_where_portaudio_names_differ(make_client, monkeypatch):
+    monkeypatch.setattr(engine_client, "portaudio_names_match_engine", lambda: False)
+    monkeypatch.setattr(engine_client, "list_sounddevice_devices", lambda: pytest.fail("PortAudio list used"))
+    client = make_client()
+    devices = client.get_devices()
+    assert [d["name"] for d in devices["inputs"]] == ["Fake Mic"]
+    client.shutdown()
 
 
 def test_get_devices_falls_back_to_engine_when_sounddevice_is_missing(make_client, monkeypatch):

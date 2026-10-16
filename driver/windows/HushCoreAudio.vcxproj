@@ -67,12 +67,14 @@
     <!-- SignMode TestSign is the developer default; the release attestation flow is in docs/SIGNING.md. -->
     <SignMode>TestSign</SignMode>
     <EnableInf2cat>true</EnableInf2cat>
-    <!-- The build-time InfVerif task fails to load its DLL on hosted runners; CI runs
-         infverif.exe on the staged package instead (.github/workflows/ci.yml). -->
-    <EnableInfVerif>false</EnableInfVerif>
-    <RunInfVerif>false</RunInfVerif>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
-    <Inf2CatWindowsVersionList>10_X64,10_ARM64</Inf2CatWindowsVersionList>
+  </PropertyGroup>
+  <!-- inf2cat OS names: Windows 10 on ARM64 starts at 1709 (RS3). -->
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <Inf2CatWindowsVersionList>10_X64</Inf2CatWindowsVersionList>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Platform)'=='ARM64'">
+    <Inf2CatWindowsVersionList>10_RS3_ARM64</Inf2CatWindowsVersionList>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -111,4 +113,7 @@
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- The WDK's build-time InfVerif task cannot load its DLL on hosted runners. This later
+       definition replaces it; CI runs infverif.exe on the staged package instead. -->
+  <Target Name="InfVerif" />
 </Project>

@@ -19,15 +19,16 @@ platform; its numbers are in each `engine` job log.
 
 | Run | Latency avg | CPU avg / max | xruns |
 | --- | --- | --- | --- |
-| 5 s | 35.2 ms | 0.7 % / 1.2 % | 0 |
-| 30 s | 35.3 ms | not recorded | 0 |
-| 4 × 15 s | 35.3–35.4 ms | not recorded | 0 |
-| 3 × 15 s, unlucky start phase | 40.6 ms (247 trim drops) | not recorded | 0 |
-| 15 s while a Docker build finished | 44.3 ms | 0.5 % / 0.6 % | 3 (cushion grew) |
+| 3 × 15 s | 35.6 ms (247 trim drops) | not recorded | 0 |
+| 5 s, before the fill fix | 35.2 ms | 0.7 % / 1.2 % | 0 |
+| 15 s while a Docker build finished, before the fill fix | 44.3 ms | 0.5 % / 0.6 % | 3 (cushion grew) |
 
-Which of the first two cases you get depends on where the render instant falls between capture
-packets when the streams start. The smoothed-margin trim keeps the spread to half a capture
-packet (5 ms here); before it, the spread was a full packet (up to 45 ms).
+Runs marked *before the fill fix* reported the ring fill before the render callback's take, which
+counted the frames just handed to the device twice; the estimate now uses the time-average queue
+depth (the midpoint before and after each callback), about half a render period (5 ms) lower. The
+start phase (where the render instant falls between capture packets) moves the result by up to
+half a capture packet; the smoothed-margin trim keeps that bound, where the old policy allowed a
+full packet.
 
 The running estimate is capture period + render period + ring fill + the DSP chain's look-ahead
 (255 samples, 5.3 ms at 48 kHz, for the noise suppressor's STFT); the start-up figure in `started` leaves out the
@@ -43,7 +44,7 @@ HushCore Microphone:
 | --- | --- |
 | Recorded level / frequency | −15.1 dBFS, 439.9 Hz |
 | Engine latency (`started`) | 8.6–11 ms |
-| `selftest 10 shared` | 5 ms periods; start-up estimate 8.4–9.5 ms, running estimate 20.9–22.7 ms; CPU 0.5–0.6 % avg; 2–3 underruns per run (Docker scheduling), 0 in the streaming check's steady state |
+| `selftest 10 shared` (before the fill fix) | 5 ms periods; start-up estimate 8.4–9.5 ms, running estimate 20.9–22.7 ms; CPU 0.5–0.6 % avg; 2–3 underruns per run (Docker scheduling), 0 in the streaming check's steady state |
 | Reconnect after the microphone module is unloaded and reloaded | streaming again 0.4 s after reload |
 
 ## Ring policy under drift (simulation)

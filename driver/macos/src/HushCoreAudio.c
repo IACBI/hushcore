@@ -480,12 +480,17 @@ static OSStatus DescribeStream(AudioObjectID obj, const AudioObjectPropertyAddre
     }
     case kAudioStreamPropertyAvailableVirtualFormats:
     case kAudioStreamPropertyAvailablePhysicalFormats: {
-        AudioStreamRangedDescription ranged;
-        memset(&ranged, 0, sizeof(ranged));
-        ranged.mFormat = MakeFormat((Float64)gRate);
-        ranged.mSampleRateRange.mMinimum = (Float64)HC_RATE_44100;
-        ranged.mSampleRateRange.mMaximum = (Float64)HC_RATE_48000;
-        ValPut(v, &ranged, (UInt32)sizeof(ranged));
+        /* Only these two rates are accepted, so each is its own range; one 44.1-48 kHz range would
+           advertise rates in between that SetPropertyData rejects. */
+        static const UInt32 rates[] = {HC_RATE_44100, HC_RATE_48000};
+        AudioStreamRangedDescription ranged[2];
+        memset(ranged, 0, sizeof(ranged));
+        for (UInt32 i = 0; i < 2; i++) {
+            ranged[i].mFormat = MakeFormat((Float64)rates[i]);
+            ranged[i].mSampleRateRange.mMinimum = (Float64)rates[i];
+            ranged[i].mSampleRateRange.mMaximum = (Float64)rates[i];
+        }
+        ValPut(v, ranged, (UInt32)sizeof(ranged));
         return kAudioHardwareNoError;
     }
     default:

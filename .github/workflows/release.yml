@@ -77,8 +77,10 @@ jobs:
             & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform $platform
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          Copy-Item scripts\windows\install-driver.ps1, scripts\windows\uninstall-driver.ps1 dist\driver\windows\
-          Compress-Archive -Path dist\driver\windows\* -DestinationPath "hushcore-driver-$env:GITHUB_REF_NAME-windows-testsigned.zip"
+          # Keep the repository layout: install-driver.ps1 resolves dist\driver\windows\<arch> two levels up.
+          7z a "hushcore-driver-$env:GITHUB_REF_NAME-windows-testsigned.zip" `
+              scripts\windows\install-driver.ps1 scripts\windows\uninstall-driver.ps1 dist\driver\windows | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: driver-windows
@@ -91,8 +93,9 @@ jobs:
       - run: bash scripts/macos/build-plugin.sh
       - name: Package
         run: |
-          cp scripts/macos/install-plugin.sh scripts/macos/uninstall-plugin.sh dist/driver/macos/
-          cd dist/driver/macos && zip -qry "$GITHUB_WORKSPACE/hushcore-plugin-${GITHUB_REF_NAME}-macos-adhoc.zip" .
+          # Keep the repository layout: install-plugin.sh looks for dist/driver/macos two levels up.
+          zip -qry "hushcore-plugin-${GITHUB_REF_NAME}-macos-adhoc.zip" \
+            scripts/macos/install-plugin.sh scripts/macos/uninstall-plugin.sh dist/driver/macos
       - uses: actions/upload-artifact@v4
         with:
           name: plugin-macos
@@ -111,12 +114,12 @@ jobs:
           merge-multiple: true
       - name: Linux virtual-device files
         run: |
-          mkdir -p linux && cp -r driver/linux scripts/linux linux/
-          (cd linux && zip -qr "../artifacts/hushcore-virtual-mic-${GITHUB_REF_NAME}-linux.zip" .)
+          # Keep the repository layout: install-virtual-mic.sh reads driver/linux two levels up.
+          zip -qr "artifacts/hushcore-virtual-mic-${GITHUB_REF_NAME}-linux.zip" driver/linux scripts/linux
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           (cd artifacts && sha256sum * > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" artifacts/* --draft --title "HushCore $GITHUB_REF_NAME" \
-            --notes "Engine binaries for Windows, macOS and Linux; the Windows driver (test-signed, needs attestation signing before public distribution); the macOS plug-in (ad-hoc signed, needs Developer ID signing and notarization); the Linux virtual-microphone files. See docs/SIGNING.md."
+            --notes "Engine binaries for Windows, macOS and Linux; the Windows driver (test-signed, needs attestation signing before public distribution); the macOS plug-in (ad-hoc signed, needs Developer ID signing and notarization); the Linux virtual-microphone files. Extract an archive and run its installer from the extracted folder, for example scripts/linux/install-virtual-mic.sh. See docs/SIGNING.md."

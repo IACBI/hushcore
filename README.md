@@ -37,7 +37,7 @@ Everything runs on your machine. Audio is processed frame by frame on the CPU an
 
 - Windows 10 or 11, macOS 11 or newer, or a Linux desktop with PipeWire or PulseAudio. The launcher is `run.bat` on Windows and `run.sh` on macOS and Linux.
 - Python 3.10 or newer, on `PATH`.
-- Node.js 20.19 or newer, only to build the dashboard. If `backend\static\index.html` already exists, the build is skipped and Node is not needed.
+- Node.js 20.19+ or 22.12+ (Node 21 is not supported), only to build the dashboard. If `backend\static\index.html` already exists, the build is skipped and Node is not needed.
 - The HushCore virtual device, to pass the processed voice to other apps (see Installation). On Linux, `libportaudio2` for the Python engine and `libpulse-dev` to build the native one.
 - Optional, for the native engine: [Rust](https://rustup.rs/) (stable). Without it HushCore uses the Python engine. Alternatively, download `hushcore-engine-*-windows-x64.zip` from the latest release and put `hushcore-engine.exe` in `backend\bin`.
 - Optional, for HQ AI: PyTorch and DeepFilterNet, which is a large download. HQ AI runs only at 48 kHz; at other sample rates it uses Eco DSP.
@@ -171,7 +171,7 @@ Her şey kendi bilgisayarınızda çalışır. Ses kare kare CPU üzerinde işle
 
 - Windows 10 veya 11, macOS 11 veya daha yeni ya da PipeWire veya PulseAudio kullanan bir Linux masaüstü. Başlatıcı Windows'ta `run.bat`, macOS ve Linux'ta `run.sh` dosyasıdır.
 - Python 3.10 veya daha yeni, `PATH` içinde.
-- Node.js 20.19 veya daha yeni; yalnızca paneli derlemek için gerekir. `backend\static\index.html` zaten varsa derleme atlanır ve Node gerekmez.
+- Node.js 20.19+ ya da 22.12+ (Node 21 desteklenmez); yalnızca paneli derlemek için gerekir. `backend\static\index.html` zaten varsa derleme atlanır ve Node gerekmez.
 - İşlenmiş sesi diğer uygulamalara aktarmak için HushCore sanal aygıtı (bkz. Kurulum). Linux'ta Python motoru için `libportaudio2`, yerel motoru derlemek için `libpulse-dev`.
 - İsteğe bağlı, yerel motor için: [Rust](https://rustup.rs/) (stable). Rust yoksa HushCore Python motorunu kullanır. Ya da son sürümden `hushcore-engine-*-windows-x64.zip` dosyasını indirip `hushcore-engine.exe` dosyasını `backend\bin` içine koyun.
 - İsteğe bağlı HQ AI için PyTorch ve DeepFilterNet; büyük bir indirmedir. HQ AI yalnızca 48 kHz'de çalışır, diğer örnekleme hızlarında Eco DSP kullanılır.

@@ -62,10 +62,9 @@ build_dashboard() {
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         fail "Node.js 20.19 or newer is required to build the dashboard. Install it from https://nodejs.org/ (it is only needed to build the dashboard)."
     fi
-    local node_major
-    node_major=$(node -p "process.versions.node.split('.')[0]")
-    if [ "$node_major" -lt 20 ]; then
-        fail "Node.js 20.19 or newer is required to build the dashboard. Install it from https://nodejs.org/ (it is only needed to build the dashboard)."
+    # The locked Vite requires ^20.19.0 || >=22.12.0 (Node 21 and 22.0-22.11 are not supported).
+    if ! node -e "const [a,b]=process.versions.node.split('.').map(Number);process.exit((a===20&&b>=19)||(a===22&&b>=12)||a>22?0:1)"; then
+        fail "Node.js 20.19+ or 22.12+ is required to build the dashboard (found $(node -v)). Install it from https://nodejs.org/ (it is only needed to build the dashboard)."
     fi
 
     cd frontend

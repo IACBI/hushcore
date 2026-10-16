@@ -109,7 +109,11 @@ impl RingRenderer {
         }
 
         if self.is_main {
-            let fill = (queued - plan.discard) as f32;
+            // Time-average queue depth (Little's law): the midpoint of the depth before and after
+            // this callback. The frames taken now wait in the device buffer, counted by its period.
+            let before = queued - plan.discard;
+            let after = before - plan.slew_drop - plan.take;
+            let fill = (before + after) as f32 / 2.0;
             self.fill_frames = smooth(self.fill_frames, fill);
             self.shared.render_fill_bits.store(self.fill_frames.to_bits(), Relaxed);
         }
@@ -146,6 +150,15 @@ mod tests {
         assert_eq!(out[0], 0.0);
         assert_eq!(out[479], 479.0);
         assert_eq!(shared.counts.underruns.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn reported_fill_is_the_midpoint_of_before_and_after() {
+        // 480 queued, 480 taken: the queue averages 240 frames over the callback.
+        let (mut r, shared) = setup(480);
+        collect(&mut r, 480);
+        let reported = f32::from_bits(shared.render_fill_bits.load(Relaxed));
+        assert_eq!(reported, smooth(0.0, 240.0));
     }
 
     #[test]

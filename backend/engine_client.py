@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import subprocess
+import sys
 import threading
 import time
 
@@ -55,6 +56,15 @@ def _ui_devices(engine_items, is_input):
             "default_samplerate": _finite_float(dev.get("sample_rate"), DEFAULT_SAMPLE_RATE),
         })
     return devices
+
+
+def portaudio_names_match_engine():
+    """True where PortAudio lists the same endpoint names the native engine resolves.
+
+    On Windows both see WASAPI endpoint names (the engine ignores the " [host API]" suffix). On
+    macOS and Linux PortAudio lists Core Audio or ALSA names that the native backends cannot resolve.
+    """
+    return sys.platform == "win32"
 
 
 def list_sounddevice_devices():
@@ -197,10 +207,11 @@ class NativeEngineClient:
             self._send({"cmd": "monitor", "enabled": False, "device": device})
 
     def get_devices(self):
-        try:
-            return list_sounddevice_devices()
-        except Exception as e:
-            logger.info("sounddevice cannot list devices (%s); asking the native engine", e)
+        if portaudio_names_match_engine():
+            try:
+                return list_sounddevice_devices()
+            except Exception as e:
+                logger.info("sounddevice cannot list devices (%s); asking the native engine", e)
         return self._engine_devices()
 
     def get_status(self):
@@ -237,18 +248,20 @@ class NativeEngineClient:
         }
 
     def virtual_device(self):
-        """Latest virtual_device object from the engine's devices event, or None if none was reported."""
+        """Fresh virtual_device object from the engine while it runs, else the last one reported (or None).
+
+        It is asked for again on every call, so installing or removing the device shows up without
+        restarting the engine. A stopped engine is not launched just to answer.
+        """
         with self._cond:
-            cached = self._virtual_device
             alive = self._proc is not None and not self._eof
-        if cached is None and alive:
+        if alive:
             try:
                 self._engine_devices()
             except RuntimeError:
-                return None
-            with self._cond:
-                cached = self._virtual_device
-        return cached
+                pass
+        with self._cond:
+            return self._virtual_device
 
     def show_vst_editor(self):
         raise RuntimeError("No VST3 plugin loaded")
