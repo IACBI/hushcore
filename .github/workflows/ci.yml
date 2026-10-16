@@ -51,3 +51,21 @@ jobs:
       - run: npm ci
 
       - run: npm run build
+
+  engine:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - run: cargo build --release
+
+      - run: cargo test --release

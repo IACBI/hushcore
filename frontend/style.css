@@ -589,6 +589,29 @@ button {
     color: var(--text-muted);
 }
 
+.engine-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    padding: 1px 6px;
+    border: 1px solid var(--card-border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+}
+
+.engine-badge.native {
+    color: var(--neon-cyan);
+    border-color: rgba(0, 242, 254, 0.25);
+    background: rgba(0, 242, 254, 0.08);
+}
+
+.xrun-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--neon-pink);
+}
+
 /* Toggles (native checkbox with role="switch", visually restyled) */
 .toggle {
     position: relative;

@@ -2,7 +2,7 @@
 rem HushCore launcher for Windows. It works when started from any folder.
 rem
 rem Usage: run.bat [options]
-rem   --rebuild   Rebuild the dashboard even when backend\static already exists.
+rem   --rebuild   Rebuild the dashboard and the native engine even when they already exist.
 rem   --ai        Install the optional HQ AI components (PyTorch, DeepFilterNet) without asking.
 rem   --no-ai     Never ask about the HQ AI components.
 rem   --help      Show this help and exit.
@@ -10,6 +10,8 @@ rem
 rem Without options: the dashboard is built only when backend\static is missing, venv is created
 rem once, backend\requirements.txt is installed again only when it changes, and you are asked
 rem once whether to install HQ AI when DeepFilterNet cannot be imported.
+rem The native audio engine is built with cargo only when no engine binary exists yet, or with
+rem --rebuild. Without Rust the Python engine is used.
 setlocal
 
 set "FLAG_REBUILD="
@@ -122,6 +124,31 @@ echo [WARNING] HQ AI install failed. Continuing with Eco DSP.
 :ai_done
 
 echo.
+echo Native audio engine (optional)
+set "NEED_ENGINE="
+if defined FLAG_REBUILD set "NEED_ENGINE=1"
+if not exist "backend\bin\hushcore-engine.exe" if not exist "engine\target\release\hushcore-engine.exe" set "NEED_ENGINE=1"
+if not defined NEED_ENGINE goto engine_done
+where cargo >nul 2>nul
+if errorlevel 1 goto no_cargo
+echo Building the native engine with cargo (release)...
+call cargo build --release --manifest-path "engine\Cargo.toml"
+if errorlevel 1 goto engine_build_failed
+goto engine_done
+
+:no_cargo
+if exist "backend\bin\hushcore-engine.exe" goto engine_done
+if exist "engine\target\release\hushcore-engine.exe" goto engine_done
+echo Rust ^(cargo^) was not found, so the Python engine will be used.
+echo Install Rust from https://rustup.rs/ to enable the native engine. This is optional.
+goto engine_done
+
+:engine_build_failed
+echo [WARNING] Native engine build failed. HushCore will use the Python engine.
+
+:engine_done
+
+echo.
 echo [3/3] Starting HushCore backend...
 if not defined HUSHCORE_PORT set "HUSHCORE_PORT=8000"
 echo Dashboard: http://127.0.0.1:%HUSHCORE_PORT% (set HUSHCORE_PORT to change the port)
@@ -143,7 +170,7 @@ exit /b 0
 :usage
 echo Usage: run.bat [--rebuild] [--ai] [--no-ai] [--help]
 echo.
-echo   --rebuild   Rebuild the dashboard even when backend\static already exists.
+echo   --rebuild   Rebuild the dashboard and the native engine even when they already exist.
 echo   --ai        Install the optional HQ AI components without asking.
 echo   --no-ai     Never ask about the HQ AI components.
 echo   --help      Show this help and exit.

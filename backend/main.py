@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from config import load_settings, save_settings, validate_and_coerce
 from audio_processor import AudioProcessor
+from engine_client import NativeEngineClient
 from presets import (
     BUILTIN_PRESETS,
     delete_user_preset,
@@ -115,16 +116,128 @@ async def auth_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Global settings and audio processor
+# Global settings and the active audio engine
 settings = load_settings()
-processor = AudioProcessor(settings)
 
-# Serializes mutations of settings: REST, WebSocket and preset calls run on
-# different threads and the DSP thread reads the same dict.
+# Serializes mutations of settings and engine switches: REST, WebSocket and preset calls run
+# on different threads and the DSP thread reads the same dict.
 settings_lock = threading.RLock()
 
+ENGINE_AUTO = "auto"
+ENGINE_NATIVE = "native"
+ENGINE_PYTHON = "python"
+ENGINE_CHOICES = (ENGINE_AUTO, ENGINE_NATIVE, ENGINE_PYTHON)
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_NATIVE_EXE_NAME = "hushcore-engine.exe"
+_NATIVE_EXE_CANDIDATES = (
+    os.path.join(_BACKEND_DIR, "bin", _NATIVE_EXE_NAME),
+    os.path.join(_BACKEND_DIR, os.pardir, "engine", "target", "release", _NATIVE_EXE_NAME),
+)
+
+def _resolve_engine_mode():
+    raw = os.environ.get("HUSHCORE_ENGINE", "").strip().lower()
+    if not raw:
+        return ENGINE_AUTO
+    if raw not in ENGINE_CHOICES:
+        logger.warning("Invalid HUSHCORE_ENGINE %r, using auto", raw)
+        return ENGINE_AUTO
+    return raw
+
+# Runtime choice set by HUSHCORE_ENGINE or POST /api/engine. Never persisted.
+engine_mode = _resolve_engine_mode()
+# The Python engine loads DeepFilterNet when constructed, so it is built only when used.
+_python_engine = None
+
+def _native_command():
+    for candidate in _NATIVE_EXE_CANDIDATES:
+        path = os.path.normpath(candidate)
+        if os.path.isfile(path):
+            return [path]
+    return None
+
+def _engine_name(engine):
+    return getattr(engine, "engine_name", ENGINE_PYTHON)
+
+def _desired_engine():
+    if engine_mode == ENGINE_PYTHON:
+        return ENGINE_PYTHON
+    # VST3 hosting exists only in the Python engine.
+    if settings.get("vst_enabled"):
+        return ENGINE_PYTHON
+    if _native_command() is None:
+        if engine_mode == ENGINE_NATIVE:
+            logger.warning("Native engine requested but %s was not found; using the Python engine", _NATIVE_EXE_NAME)
+        return ENGINE_PYTHON
+    return ENGINE_NATIVE
+
+def _create_engine(name):
+    global _python_engine
+    if name == ENGINE_NATIVE:
+        command = _native_command()
+        if command is not None:
+            return NativeEngineClient(settings, command)
+        logger.warning("Native engine binary not found; using the Python engine")
+    if _python_engine is None:
+        _python_engine = AudioProcessor(settings)
+    return _python_engine
+
+processor = _create_engine(_desired_engine())
+
+def _switch_engine(target):
+    """Make `target` the active engine, restarting it if the old engine was running. Caller holds settings_lock."""
+    global processor
+    if _engine_name(processor) == target:
+        return
+    previous = processor
+    was_running = previous.running.is_set()
+    if was_running:
+        previous.stop()
+    if _engine_name(previous) == ENGINE_NATIVE:
+        previous.shutdown()
+    processor = _create_engine(target)
+    processor.update_settings(settings)
+    if processor is not previous and _engine_name(previous) == ENGINE_PYTHON:
+        # Keeps the idle Python engine's VST3 state in line with the settings.
+        previous.update_settings(settings)
+    logger.info("Audio engine is now %s", _engine_name(processor))
+    if was_running:
+        _start_active_engine()
+
+def _reconcile_engine():
+    """Switch to the engine that the current mode and settings call for. Caller holds settings_lock."""
+    _switch_engine(_desired_engine())
+
+def _start_active_engine():
+    """Start the active engine; a native engine that cannot start hands over to Python. Caller holds settings_lock."""
+    if processor.start():
+        return True
+    if _engine_name(processor) != ENGINE_NATIVE:
+        return False
+    logger.warning("Native engine failed to start; falling back to the Python engine")
+    _switch_engine(ENGINE_PYTHON)
+    return processor.start()
+
+def _restart_active_engine():
+    processor.stop()
+    processor.update_settings(settings)
+    return _start_active_engine()
+
+def _start_engine_locked():
+    _reconcile_engine()
+    return _start_active_engine()
+
+def _engine_state():
+    command = _native_command()
+    return {
+        "active": _engine_name(processor),
+        "mode": engine_mode,
+        "available": [ENGINE_NATIVE, ENGINE_PYTHON] if command else [ENGINE_PYTHON],
+        "native_path": command[0] if command else None,
+    }
+
 # Audio pipeline will start stopped by default. User starts it from the dashboard.
-logger.info("Audio engine initialized in STOPPED state. Waiting for client to start.")
+logger.info("Audio engine (%s) initialized in STOPPED state. Waiting for client to start.", _engine_name(processor))
 
 class SettingUpdate(BaseModel):
     key: str
@@ -132,6 +245,9 @@ class SettingUpdate(BaseModel):
 
 class PresetRequest(BaseModel):
     name: str
+
+class EngineRequest(BaseModel):
+    engine: str
 
 def apply_setting(key, value, *, persist=True):
     """Validate, store and push one setting to the processor. Returns (ok, error)."""
@@ -146,9 +262,10 @@ def apply_setting(key, value, *, persist=True):
 
         # Process device restarts or toggle monitoring
         if key in ["input_device", "output_device"]:
-            processor.stop()
+            _restart_active_engine()
+        elif key == "vst_enabled":
+            _reconcile_engine()
             processor.update_settings(settings)
-            processor.start()
         elif key == "monitor_enabled":
             processor.settings[key] = coerced_val
             if coerced_val:
@@ -241,7 +358,8 @@ def show_vst_editor():
 
 @app.post("/api/start")
 def start_pipeline():
-    success = processor.start()
+    with settings_lock:
+        success = _start_engine_locked()
     if not success:
         raise HTTPException(status_code=500, detail="Failed to start audio pipeline")
     return {"status": "started"}
@@ -251,6 +369,23 @@ def stop_pipeline():
     processor.stop()
     return {"status": "stopped"}
 
+@app.get("/api/engine")
+def get_engine():
+    return _engine_state()
+
+@app.post("/api/engine")
+def set_engine(body: EngineRequest):
+    global engine_mode
+    choice = body.engine.strip().lower()
+    if choice not in ENGINE_CHOICES:
+        raise HTTPException(status_code=400, detail="Engine must be one of: auto, native, python")
+    with settings_lock:
+        if choice == ENGINE_NATIVE and _native_command() is None:
+            raise HTTPException(status_code=400, detail="Native engine binary (hushcore-engine.exe) was not found")
+        engine_mode = choice
+        _reconcile_engine()
+    return {"status": "success", **_engine_state()}
+
 def _json_default(obj):
     # numpy scalars and arrays from the DSP side
     if hasattr(obj, "tolist"):
@@ -258,19 +393,25 @@ def _json_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 def build_metrics():
-    get_status = getattr(processor, "get_status", None)
+    current = processor
+    get_status = getattr(current, "get_status", None)
     if callable(get_status):
-        return get_status()
-    return {
-        "input_rms": processor.input_rms,
-        "output_rms": processor.output_rms,
-        "gate_state": processor.gate_state,
-        "fft_data": processor.fft_data,
-        "is_running": processor.running.is_set(),
-        "df_available": processor.df_available,
-        "vst_loaded": processor.vst_plugin is not None,
-        "vst_failed": processor.vst_failed
-    }
+        status = dict(get_status())
+    else:
+        status = {
+            "input_rms": current.input_rms,
+            "output_rms": current.output_rms,
+            "gate_state": current.gate_state,
+            "fft_data": current.fft_data,
+            "is_running": current.running.is_set(),
+            "df_available": current.df_available,
+            "vst_loaded": current.vst_plugin is not None,
+            "vst_failed": current.vst_failed
+        }
+    status.setdefault("engine", _engine_name(current))
+    # The Python engine has no xrun counter; it reports 0.
+    status.setdefault("xruns", getattr(current, "xruns", 0))
+    return status
 
 async def _handle_ws_message(raw):
     try:
@@ -405,10 +546,11 @@ def create_tray_icon():
         webbrowser.open(DASHBOARD_URL)
 
     def on_toggle_engine(icon, item):
-        if processor.running.is_set():
-            processor.stop()
-        else:
-            processor.start()
+        with settings_lock:
+            if processor.running.is_set():
+                processor.stop()
+            else:
+                _start_engine_locked()
 
     def get_engine_label(item):
         return "🛑 Stop Audio Engine" if processor.running.is_set() else "⚡ Start Audio Engine"
@@ -416,6 +558,9 @@ def create_tray_icon():
     def on_exit(icon, item):
         logger.info("Stopping HushCore server and exiting")
         processor.stop()
+        if _engine_name(processor) == ENGINE_NATIVE:
+            # os._exit below skips atexit, so the engine process is shut down here.
+            processor.shutdown()
         icon.stop()
         os._exit(0)
 
@@ -445,6 +590,19 @@ if __name__ == "__main__":
     if os.environ.get("HUSHCORE_NO_BROWSER") != "1":
         threading.Thread(target=_open_dashboard_when_ready, daemon=True).start()
 
-    # Start system tray icon in the main thread (blocks until exited)
-    tray_icon = create_tray_icon()
-    tray_icon.run()
+    # The tray is a convenience: without pystray or a desktop the dashboard keeps working headless.
+    try:
+        tray_icon = create_tray_icon()
+    except Exception as exc:
+        logger.warning("System tray unavailable (%s); running without it. Press Ctrl+C to exit.", exc)
+        tray_icon = None
+
+    try:
+        if tray_icon is not None:
+            tray_icon.run()  # blocks the main thread until Exit is chosen
+        else:
+            server_thread.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        processor.stop()

@@ -113,6 +113,16 @@
                                 </select>
                             </div>
                         </div>
+
+                        <div class="control-group adv-only">
+                            <span class="field-label" id="engine-mode-label">Audio engine</span>
+                            <div id="engine-mode-group" class="mode-selector" role="group" aria-labelledby="engine-mode-label">
+                                <button id="engine-mode-auto" class="mode-btn" type="button" aria-pressed="false" data-engine="auto">AUTO</button>
+                                <button id="engine-mode-native" class="mode-btn" type="button" aria-pressed="false" data-engine="native">NATIVE</button>
+                                <button id="engine-mode-python" class="mode-btn" type="button" aria-pressed="false" data-engine="python">PYTHON</button>
+                            </div>
+                            <span id="engine-mode-note" class="cable-tip"></span>
+                        </div>
                     </div>
                 </div>
 
@@ -128,6 +138,9 @@
                             <span id="status-latency" class="status-metric">-- ms</span>
                             <span class="status-sep" aria-hidden="true">&middot;</span>
                             <span id="status-cpu" class="status-metric">CPU --</span>
+                            <span class="status-sep" aria-hidden="true">&middot;</span>
+                            <span id="status-engine" class="engine-badge">--</span>
+                            <span id="status-xruns" class="xrun-badge" hidden>0 xruns</span>
                         </div>
 
                         <div class="slider-group">

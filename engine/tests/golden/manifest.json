@@ -1,0 +1,91 @@
+{
+  "sample_rate": 48000,
+  "block_size": 480,
+  "samples": 12000,
+  "seed": 20260101,
+  "source": "backend/audio_processor.py",
+  "cases": [
+    {
+      "name": "eq",
+      "module": "eq",
+      "params": {
+        "low_gain_db": 6.0,
+        "mid_gain_db": -5.0,
+        "high_gain_db": 4.0
+      },
+      "input": "eq.input.f32",
+      "expected": "eq.expected.f32",
+      "max_abs_tolerance": 1e-05,
+      "peak_expected": 0.9824502468109131,
+      "peak_input": 0.7307597398757935
+    },
+    {
+      "name": "compressor",
+      "module": "compressor",
+      "params": {
+        "threshold_db": -18.0,
+        "ratio": 4.0,
+        "attack_ms": 10.0,
+        "release_ms": 100.0
+      },
+      "input": "compressor.input.f32",
+      "expected": "compressor.expected.f32",
+      "max_abs_tolerance": 0.0001,
+      "peak_expected": 0.5744684934616089,
+      "peak_input": 0.6631653904914856
+    },
+    {
+      "name": "gate",
+      "module": "gate",
+      "params": {
+        "threshold_db": -45.0,
+        "release_ms": 150.0
+      },
+      "input": "gate.input.f32",
+      "expected": "gate.expected.f32",
+      "max_abs_tolerance": 0.0001,
+      "peak_expected": 0.30817291140556335,
+      "peak_input": 0.30817291140556335
+    },
+    {
+      "name": "deesser",
+      "module": "deesser",
+      "params": {
+        "threshold_db": -25.0,
+        "amount": 0.5
+      },
+      "input": "deesser.input.f32",
+      "expected": "deesser.expected.f32",
+      "max_abs_tolerance": 0.0001,
+      "peak_expected": 1.0337083339691162,
+      "peak_input": 1.2276004552841187
+    },
+    {
+      "name": "exciter",
+      "module": "exciter",
+      "params": {
+        "frequency": 3000.0,
+        "amount": 0.6,
+        "mix": 0.4
+      },
+      "input": "exciter.input.f32",
+      "expected": "exciter.expected.f32",
+      "max_abs_tolerance": 1e-05,
+      "peak_expected": 0.5578030943870544,
+      "peak_input": 0.6138118505477905
+    },
+    {
+      "name": "limiter",
+      "module": "limiter",
+      "params": {
+        "threshold_db": -1.0,
+        "release_ms": 100.0
+      },
+      "input": "limiter.input.f32",
+      "expected": "limiter.expected.f32",
+      "max_abs_tolerance": 0.0001,
+      "peak_expected": 0.8912509679794312,
+      "peak_input": 1.5
+    }
+  ]
+}

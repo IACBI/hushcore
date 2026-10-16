@@ -52,6 +52,10 @@ let engineRunning = null;
 let aiAvailable = null;
 let gateOpen = null;
 let powerBusy = false;
+let engineBusy = false;
+let engineState = null;
+let shownEngine = null;
+let shownXruns = null;
 let isVstFailed = false;
 let armedDelete = null;
 let clipTimer = 0;
@@ -100,6 +104,10 @@ const dom = {
     statusRate: $('status-rate'),
     statusLatency: $('status-latency'),
     statusCpu: $('status-cpu'),
+    statusEngine: $('status-engine'),
+    statusXruns: $('status-xruns'),
+    engineModeGroup: $('engine-mode-group'),
+    engineModeNote: $('engine-mode-note'),
     inputMeterFill: $('input-meter-fill'),
     outputMeterFill: $('output-meter-fill'),
     gateMarker: $('gate-threshold-marker'),
@@ -495,7 +503,7 @@ async function fetchPresets() {
 
 async function loadAll() {
     const failures = [];
-    const steps = [['settings', fetchSettings], ['devices', fetchDevices], ['presets', fetchPresets]];
+    const steps = [['settings', fetchSettings], ['devices', fetchDevices], ['presets', fetchPresets], ['engine', fetchEngine]];
     for (const [name, load] of steps) {
         try {
             await load();
@@ -756,6 +764,25 @@ function updateStatusStrip(m) {
     setText(dom.statusRate, rate && rate > 0 ? `${(rate / 1000).toFixed(1).replace(/\.0$/, '')} kHz` : '-- kHz');
     setText(dom.statusLatency, latency !== null ? `${Math.round(latency)} ms` : '-- ms');
     setText(dom.statusCpu, cpu !== null ? `CPU ${Math.round(Math.min(100, Math.max(0, cpu)))}%` : 'CPU --');
+
+    const engine = m.engine === 'native' ? 'native' : 'python';
+    if (engine !== shownEngine) {
+        shownEngine = engine;
+        const native = engine === 'native';
+        setText(dom.statusEngine, native ? 'NATIVE' : 'PYTHON');
+        dom.statusEngine.classList.toggle('native', native);
+        dom.statusEngine.title = native
+            ? 'Audio engine: native Rust engine'
+            : 'Audio engine: Python engine (VST3 hosting and HQ AI)';
+    }
+
+    const xruns = Number.isFinite(m.xruns) ? Math.max(0, Math.trunc(m.xruns)) : 0;
+    if (xruns !== shownXruns) {
+        shownXruns = xruns;
+        dom.statusXruns.hidden = xruns === 0;
+        setText(dom.statusXruns, `${xruns} xrun${xruns === 1 ? '' : 's'}`);
+        dom.statusXruns.title = 'Audio buffer underruns and overruns since the engine started';
+    }
 }
 
 function flashClip() {
@@ -970,6 +997,52 @@ async function saveCurrentAsPreset(event) {
 }
 
 // --- Engine, devices, VST actions -----------------------------------------
+const ENGINE_LABELS = { auto: 'Auto', native: 'Native', python: 'Python' };
+
+function engineModeButtons() {
+    return dom.engineModeGroup.querySelectorAll('[data-engine]');
+}
+
+function renderEngineMode() {
+    if (!engineState) return;
+    const nativeAvailable = Array.isArray(engineState.available) && engineState.available.includes('native');
+    for (const btn of engineModeButtons()) {
+        const mode = btn.dataset.engine;
+        const unavailable = mode === 'native' && !nativeAvailable;
+        setPressed(btn, mode === engineState.mode);
+        btn.disabled = engineBusy || unavailable;
+        btn.title = unavailable ? 'hushcore-engine.exe was not found' : '';
+    }
+    let note = '';
+    if (!nativeAvailable) {
+        note = 'Native engine not installed: the Python engine is used.';
+    } else if (engineState.active === 'python' && engineState.mode !== 'python') {
+        note = 'Python is running: VST3 hosting or a native fallback.';
+    }
+    setText(dom.engineModeNote, note);
+}
+
+async function fetchEngine() {
+    engineState = await api('/api/engine');
+    renderEngineMode();
+}
+
+async function setEngineMode(mode) {
+    if (engineBusy) return;
+    engineBusy = true;
+    renderEngineMode();
+    try {
+        engineState = await api('/api/engine', { method: 'POST', body: { engine: mode } });
+        showToast(`Audio engine set to ${ENGINE_LABELS[mode]}. ${ENGINE_LABELS[engineState.active]} is active.`);
+    } catch (err) {
+        console.error('Engine change failed:', err);
+        showToast(`Could not change the audio engine: ${err.message}`, 'error', 5000);
+    } finally {
+        engineBusy = false;
+        renderEngineMode();
+    }
+}
+
 async function togglePower() {
     if (powerBusy) return;
     const starting = !engineRunning;
@@ -1059,6 +1132,7 @@ function setupEventListeners() {
     });
 
     dom.powerBtn.addEventListener('click', togglePower);
+    engineModeButtons().forEach((btn) => btn.addEventListener('click', () => setEngineMode(btn.dataset.engine)));
     dom.refreshDevicesBtn.addEventListener('click', refreshDevices);
 
     dom.inputSelect.addEventListener('change', (e) => sendConfigChange('input_device', e.target.value));

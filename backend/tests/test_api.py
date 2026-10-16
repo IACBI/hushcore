@@ -1,5 +1,6 @@
 import importlib
 import json
+import logging
 import os
 import pathlib
 import sys
@@ -20,6 +21,10 @@ STATUS_KEYS = {
     "df_available", "vst_loaded", "vst_failed", "sample_rate",
     "latency_ms", "cpu_load", "clipping",
 }
+# The WebSocket frame adds the active engine name and its xrun count to the engine's status.
+WS_KEYS = STATUS_KEYS | {"engine", "xruns"}
+
+FAKE_ENGINE = os.path.join(BACKEND_DIR, "tests", "fake_engine.py")
 
 
 class FakeAudioProcessor:
@@ -83,6 +88,9 @@ def tmp_path():
 def app_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_FILE", str(tmp_path / "settings.json"))
     monkeypatch.setattr(presets, "USER_PRESETS_FILE", str(tmp_path / "user_presets.json"))
+    # Tests run the Python stub unless they opt into the native engine, so a real
+    # hushcore-engine.exe on this machine is never launched by accident.
+    monkeypatch.setenv("HUSHCORE_ENGINE", "python")
     # Re-execute main so settings, processor and API_KEY start fresh per test
     module = importlib.reload(main_module)
     # Reload resets ALLOWED_HOSTS; TestClient always sends Host: testserver
@@ -95,6 +103,16 @@ def api(app_env):
     client = TestClient(app_env.app)
     client.headers.update({"X-API-Key": app_env.API_KEY})
     return client
+
+
+@pytest.fixture
+def native_api(app_env, monkeypatch):
+    """App with the native engine available, backed by fake_engine.py instead of the Rust binary."""
+    monkeypatch.setattr(app_env, "_native_command", lambda: [sys.executable, "-u", FAKE_ENGINE])
+    yield app_env
+    current = app_env.processor
+    if app_env._engine_name(current) == "native":
+        current.shutdown()
 
 
 def test_api_requires_key(app_env):
@@ -294,7 +312,9 @@ def test_websocket_auth_ok_then_metrics_frame(api, app_env):
         ws.send_text(_auth_message(app_env.API_KEY))
         assert json.loads(ws.receive_text()) == {"action": "auth_ok"}
         metrics = json.loads(ws.receive_text())
-        assert set(metrics) == STATUS_KEYS
+        assert set(metrics) == WS_KEYS
+        assert metrics["engine"] == "python"
+        assert metrics["xruns"] == 0
 
 
 def test_websocket_survives_bad_messages_and_applies_settings(api, app_env):
@@ -308,7 +328,7 @@ def test_websocket_survives_bad_messages_and_applies_settings(api, app_env):
         ws.send_text(json.dumps({"action": "update_setting", "key": "gate_release_ms", "value": 5000}))
 
         metrics = json.loads(ws.receive_text())
-        assert set(metrics) == STATUS_KEYS
+        assert set(metrics) == WS_KEYS
 
         for _ in range(500):
             if app_env.settings["gate_release_ms"] == 1000.0:
@@ -348,3 +368,72 @@ def test_index_is_no_store_and_injects_key(app_env, tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "no-store"
     assert f'window.HUSHCORE_API_KEY = "{app_env.API_KEY}";' in resp.text
+
+
+def test_engine_endpoint_reports_python_without_native_binary(api, app_env, monkeypatch):
+    monkeypatch.setattr(app_env, "_native_command", lambda: None)
+    assert api.get("/api/engine").json() == {
+        "active": "python", "mode": "python", "available": ["python"], "native_path": None,
+    }
+
+
+def test_engine_post_rejects_unknown_choice(api):
+    assert api.post("/api/engine", json={"engine": "turbo"}).status_code == 400
+
+
+def test_engine_post_native_without_binary_is_rejected(api, app_env, monkeypatch):
+    monkeypatch.setattr(app_env, "_native_command", lambda: None)
+    assert api.post("/api/engine", json={"engine": "native"}).status_code == 400
+    assert api.get("/api/engine").json()["active"] == "python"
+
+
+def test_engine_switch_while_stopped_and_websocket_reports_engine(native_api, api, app_env):
+    resp = api.post("/api/engine", json={"engine": "native"})
+    assert resp.status_code == 200
+    assert resp.json()["active"] == "native"
+
+    body = api.get("/api/engine").json()
+    assert body["active"] == "native"
+    assert body["mode"] == "native"
+    assert body["available"] == ["native", "python"]
+    assert body["native_path"] == sys.executable
+
+    assert api.post("/api/start").status_code == 200
+    with api.websocket_connect("/ws") as ws:
+        ws.send_text(_auth_message(app_env.API_KEY))
+        assert json.loads(ws.receive_text()) == {"action": "auth_ok"}
+        metrics = json.loads(ws.receive_text())
+    assert set(metrics) == WS_KEYS
+    assert metrics["engine"] == "native"
+    assert metrics["is_running"] is True
+    assert metrics["xruns"] == 0
+
+    assert api.post("/api/stop").status_code == 200
+    back = api.post("/api/engine", json={"engine": "python"}).json()
+    assert back["active"] == "python"
+    assert api.get("/api/engine").json()["mode"] == "python"
+
+
+def test_native_start_failure_falls_back_to_python(native_api, api, app_env, caplog):
+    assert api.post("/api/engine", json={"engine": "native"}).json()["active"] == "native"
+    with caplog.at_level(logging.WARNING):
+        resp = api.post("/api/settings", json={"key": "input_device", "value": "__error__"})
+    assert resp.status_code == 200
+    assert api.get("/api/engine").json()["active"] == "python"
+    assert "falling back to the Python engine" in caplog.text
+
+
+def test_enabling_vst_moves_running_native_engine_to_python_and_back(native_api, api, app_env):
+    assert api.post("/api/engine", json={"engine": "native"}).json()["active"] == "native"
+    assert api.post("/api/start").status_code == 200
+    native = app_env.processor
+    assert native.is_running() is True
+
+    assert api.post("/api/settings", json={"key": "vst_enabled", "value": True}).status_code == 200
+    assert api.get("/api/engine").json()["active"] == "python"
+    assert native.is_running() is False
+    assert app_env.processor.running.is_set() is True
+
+    assert api.post("/api/settings", json={"key": "vst_enabled", "value": False}).status_code == 200
+    assert api.get("/api/engine").json()["active"] == "native"
+    assert app_env.processor.is_running() is True
