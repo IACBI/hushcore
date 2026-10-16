@@ -1,455 +1,474 @@
-/* ==========================================================================
-   HUSHCORE - CLIENT APPLICATION LOGIC
-   ========================================================================== */
+/* HushCore dashboard client.
+   REST covers settings, devices, presets and engine control. The WebSocket streams
+   live metrics and carries fast setting updates. */
 
-const HUSHCORE_API_KEY = window.HUSHCORE_API_KEY || '';
+const API_KEY = window.HUSHCORE_API_KEY || '';
 const API_BASE = window.location.origin;
-const WS_URL = `ws://${window.location.host}/ws?token=${HUSHCORE_API_KEY}`;
+// The key is sent as the first WebSocket message, not in the URL, so it stays out of
+// server logs and browser history. See connectWebSocket().
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+const WS_AUTH_FAILED_CODE = 4001;
+const WS_AUTH_FAILED_LABEL = 'AUTHENTICATION FAILED - RELOAD THE PAGE';
 
+const WS_RETRY_MIN_MS = 1000;
+const WS_RETRY_MAX_MS = 10000;
+const SETTING_SEND_INTERVAL_MS = 50; // caps slider traffic at about 20 messages/s per control
+const CLIP_HOLD_MS = 900;
+// Float settings pass through JSON and backend coercion, so exact equality would miss
+// presets that were applied correctly.
+const FLOAT_TOLERANCE = 1e-4;
+const TOAST_LIMIT = 3;
+const DELETE_ARM_MS = 3000;
+
+const BUILTIN_LABELS = { off: 'Bypass', voice: 'Clean voice', gaming: 'Gaming', broadcaster: 'Broadcaster' };
+// Easy-mode tone slider steps. These shape the EQ only and are not presets.
+const TONE_STEPS = [
+    { label: 'Warm', low: 4.0, mid: 0.5, high: -3.0 },
+    { label: 'Natural', low: 0.0, mid: 0.0, high: 0.0 },
+    { label: 'Bright', low: -2.0, mid: 1.0, high: 4.5 },
+];
+// Windows reports device names in the OS language, so the Turkish keywords are needed.
+const VIRTUAL_OUTPUT_HINTS = ['cable', 'virtual', 'vb-audio', 'voicemeeter'];
+
+class ApiError extends Error {
+    constructor(message, status) {
+        super(message);
+        this.name = 'ApiError';
+        this.status = status;
+    }
+}
+
+// --- Shared state ---------------------------------------------------------
 let socket = null;
-let settings = {};
-let devices = { inputs: [], outputs: [] };
+// True only between the backend's auth_ok and the socket closing. Settings go over the
+// socket only while this is set; otherwise they fall back to REST.
+let socketReady = false;
+let reconnectTimer = null;
+let reconnectDelay = WS_RETRY_MIN_MS;
 
-// Visualizer State
+let settings = {};
+let presets = { builtin: {}, user: {} };
+let engineRunning = null;
+let aiAvailable = null;
+let gateOpen = null;
+let powerBusy = false;
+let isVstFailed = false;
+let armedDelete = null;
+let clipTimer = 0;
+let lastSaveErrorAt = 0;
+const throttles = new Map();
+
+// Visualizer state
 let currentVizMode = 'spec';
-let rawFFTData = new Array(64).fill(0);
-let smoothedFFT = new Array(64).fill(0);
+const rawFFTData = new Array(64).fill(0);
+const smoothedFFT = new Array(64).fill(0);
+const cascadeHistory = [];
+const maxCascadeFrames = 30;
 let inputLevelSmoothed = -60;
 let outputLevelSmoothed = -60;
-let isGateOpen = false;
+let canvasW = 0;
+let canvasH = 0;
+let dpr = 1;
+let barGradient = null;
+let rafId = 0;
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-// 3D Cascade History Buffer
-let cascadeHistory = [];
-const maxCascadeFrames = 30;
-
-// VST State tracking
-let isVstLoaded = false;
-let isVstFailed = false;
-
-// DOM Cache
+// --- DOM cache ------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
 const dom = {
-    appWrapper: document.getElementById('app-wrapper'),
-    
-    // View Mode selectors
-    viewModeSimple: document.getElementById('view-mode-simple'),
-    viewModeAdv: document.getElementById('view-mode-adv'),
-    
-    // Header controls
-    powerBtn: document.getElementById('power-btn'),
-    engineStatus: document.getElementById('engine-status'),
-    aiStatus: document.getElementById('ai-status'),
-    connIndicator: document.getElementById('connection-indicator'),
-    refreshDevicesBtn: document.getElementById('refresh-devices-btn'),
-    
-    // Routing panel
-    inputSelect: document.getElementById('input-device-select'),
-    outputSelect: document.getElementById('output-device-select'),
-    routingTipBox: document.getElementById('routing-tip-box'),
-    monitorCheckbox: document.getElementById('monitor-enabled-checkbox'),
-    monitorSelect: document.getElementById('monitor-device-select'),
-    
-    // Level Meters & Gains
-    inputGainSlider: document.getElementById('input-gain-slider'),
-    inputGainVal: document.getElementById('input-gain-val'),
-    outputGainSlider: document.getElementById('output-gain-slider'),
-    outputGainVal: document.getElementById('output-gain-val'),
-    inputMeterFill: document.getElementById('input-meter-fill'),
-    gateMarker: document.getElementById('gate-threshold-marker'),
-    outputMeterFill: document.getElementById('output-meter-fill'),
-    
-    // Canvas Visualizer
-    canvas: document.getElementById('visualizer-canvas'),
-    vizTabSpec: document.getElementById('viz-tab-spec'),
-    vizTabWave: document.getElementById('viz-tab-wave'),
-    gateLed: document.getElementById('gate-led'),
-    gateText: document.getElementById('gate-text'),
-    
-    // Easy mode presets
-    presetOff: document.getElementById('preset-btn-off'),
-    presetVoice: document.getElementById('preset-btn-voice'),
-    presetGaming: document.getElementById('preset-btn-gaming'),
-    presetBroadcaster: document.getElementById('preset-btn-broadcaster'),
-    easyNSSlider: document.getElementById('easy-ns-slider'),
-    easyNSVal: document.getElementById('easy-ns-val'),
-    easyToneSlider: document.getElementById('easy-tone-slider'),
-    easyToneVal: document.getElementById('easy-tone-val'),
-    
-    // Advanced NS
-    nsModeOff: document.getElementById('ns-mode-off'),
-    nsModeEco: document.getElementById('ns-mode-eco'),
-    nsModeHigh: document.getElementById('ns-mode-high'),
-    dfInfo: document.getElementById('df-availability-info'),
-    nsStrengthSlider: document.getElementById('ns-strength-slider'),
-    nsStrengthVal: document.getElementById('ns-strength-val'),
-    
-    // Advanced Noise Gate
-    gateCheckbox: document.getElementById('gate-enabled-checkbox'),
-    gateThreshSlider: document.getElementById('gate-thresh-slider'),
-    gateThreshVal: document.getElementById('gate-thresh-val'),
-    gateReleaseSlider: document.getElementById('gate-release-slider'),
-    gateReleaseVal: document.getElementById('gate-release-val'),
-    
-    // Advanced EQ
-    eqCheckbox: document.getElementById('eq-enabled-checkbox'),
-    eqLowSlider: document.getElementById('eq-low-slider'),
-    eqLowVal: document.getElementById('eq-low-val'),
-    eqMidSlider: document.getElementById('eq-mid-slider'),
-    eqMidVal: document.getElementById('eq-mid-val'),
-    eqHighSlider: document.getElementById('eq-high-slider'),
-    eqHighVal: document.getElementById('eq-high-val'),
-    
-    // Advanced Compressor
-    compCheckbox: document.getElementById('compressor-enabled-checkbox'),
-    compThreshSlider: document.getElementById('comp-thresh-slider'),
-    compThreshVal: document.getElementById('comp-thresh-val'),
-    compRatioSlider: document.getElementById('comp-ratio-slider'),
-    compRatioVal: document.getElementById('comp-ratio-val'),
-    compAttackSlider: document.getElementById('comp-attack-slider'),
-    compAttackVal: document.getElementById('comp-attack-val'),
-    compReleaseSlider: document.getElementById('comp-release-slider'),
-    compReleaseVal: document.getElementById('comp-release-val'),
+    appWrapper: $('app-wrapper'),
+    viewModeSimple: $('view-mode-simple'),
+    viewModeAdv: $('view-mode-adv'),
+    powerBtn: $('power-btn'),
+    engineStatus: $('engine-status'),
+    aiStatus: $('ai-status'),
+    connIndicator: $('connection-indicator'),
+    toastRegion: $('toast-region'),
+    refreshDevicesBtn: $('refresh-devices-btn'),
 
-    // Advanced De-Esser
-    deesserCheckbox: document.getElementById('deesser-enabled-checkbox'),
-    deesserThreshSlider: document.getElementById('deesser-thresh-slider'),
-    deesserThreshVal: document.getElementById('deesser-thresh-val'),
-    deesserAmountSlider: document.getElementById('deesser-amount-slider'),
-    deesserAmountVal: document.getElementById('deesser-amount-val'),
+    inputSelect: $('input-device-select'),
+    outputSelect: $('output-device-select'),
+    routingTipBox: $('routing-tip-box'),
+    monitorCheckbox: $('monitor-enabled-checkbox'),
+    monitorSelect: $('monitor-device-select'),
+    bufferSizeSelect: $('buffer-size-select'),
 
-    // Advanced Vocal Exciter
-    exciterCheckbox: document.getElementById('exciter-enabled-checkbox'),
-    exciterFreqSlider: document.getElementById('exciter-freq-slider'),
-    exciterFreqVal: document.getElementById('exciter-freq-val'),
-    exciterAmountSlider: document.getElementById('exciter-amount-slider'),
-    exciterAmountVal: document.getElementById('exciter-amount-val'),
-    exciterMixSlider: document.getElementById('exciter-mix-slider'),
-    exciterMixVal: document.getElementById('exciter-mix-val'),
+    inputGainSlider: $('input-gain-slider'),
+    inputGainVal: $('input-gain-val'),
+    outputGainSlider: $('output-gain-slider'),
+    outputGainVal: $('output-gain-val'),
+    statusRate: $('status-rate'),
+    statusLatency: $('status-latency'),
+    statusCpu: $('status-cpu'),
+    inputMeterFill: $('input-meter-fill'),
+    outputMeterFill: $('output-meter-fill'),
+    gateMarker: $('gate-threshold-marker'),
+    clipIndicator: $('clip-indicator'),
 
-    // Advanced VST3 Hosting
-    vstCheckbox: document.getElementById('vst-enabled-checkbox'),
-    vstPathInput: document.getElementById('vst-path-input'),
-    vstLoadBtn: document.getElementById('vst-load-btn'),
-    vstStatusMsg: document.getElementById('vst-status-msg'),
-    vstEditorBtn: document.getElementById('vst-editor-btn'),
-    
-    // Latency Buffer tuning
-    bufferSizeSelect: document.getElementById('buffer-size-select'),
-    
-    // Visualizer tabs
-    vizTabCascade: document.getElementById('viz-tab-cascade')
+    canvas: $('visualizer-canvas'),
+    vizTabSpec: $('viz-tab-spec'),
+    vizTabPulse: $('viz-tab-pulse'),
+    vizTabCascade: $('viz-tab-cascade'),
+    gateLed: $('gate-led'),
+    gateText: $('gate-text'),
+
+    userPresetList: $('user-preset-list'),
+    savePresetForm: $('save-preset-form'),
+    savePresetInput: $('save-preset-input'),
+    savePresetBtn: $('save-preset-btn'),
+    easyNSSlider: $('easy-ns-slider'),
+    easyNSVal: $('easy-ns-val'),
+    easyToneSlider: $('easy-tone-slider'),
+    easyToneVal: $('easy-tone-val'),
+
+    nsModeOff: $('ns-mode-off'),
+    nsModeEco: $('ns-mode-eco'),
+    nsModeHigh: $('ns-mode-high'),
+    dfInfo: $('df-availability-info'),
+    nsStrengthSlider: $('ns-strength-slider'),
+    nsStrengthVal: $('ns-strength-val'),
+    fxTabs: $('fx-tabs'),
+
+    gateCheckbox: $('gate-enabled-checkbox'),
+    gateThreshSlider: $('gate-thresh-slider'),
+    gateThreshVal: $('gate-thresh-val'),
+    gateReleaseSlider: $('gate-release-slider'),
+    gateReleaseVal: $('gate-release-val'),
+
+    eqCheckbox: $('eq-enabled-checkbox'),
+    eqLowSlider: $('eq-low-slider'),
+    eqLowVal: $('eq-low-val'),
+    eqMidSlider: $('eq-mid-slider'),
+    eqMidVal: $('eq-mid-val'),
+    eqHighSlider: $('eq-high-slider'),
+    eqHighVal: $('eq-high-val'),
+
+    compCheckbox: $('compressor-enabled-checkbox'),
+    compThreshSlider: $('comp-thresh-slider'),
+    compThreshVal: $('comp-thresh-val'),
+    compRatioSlider: $('comp-ratio-slider'),
+    compRatioVal: $('comp-ratio-val'),
+    compAttackSlider: $('comp-attack-slider'),
+    compAttackVal: $('comp-attack-val'),
+    compReleaseSlider: $('comp-release-slider'),
+    compReleaseVal: $('comp-release-val'),
+
+    deesserCheckbox: $('deesser-enabled-checkbox'),
+    deesserThreshSlider: $('deesser-thresh-slider'),
+    deesserThreshVal: $('deesser-thresh-val'),
+    deesserAmountSlider: $('deesser-amount-slider'),
+    deesserAmountVal: $('deesser-amount-val'),
+
+    exciterCheckbox: $('exciter-enabled-checkbox'),
+    exciterFreqSlider: $('exciter-freq-slider'),
+    exciterFreqVal: $('exciter-freq-val'),
+    exciterAmountSlider: $('exciter-amount-slider'),
+    exciterAmountVal: $('exciter-amount-val'),
+    exciterMixSlider: $('exciter-mix-slider'),
+    exciterMixVal: $('exciter-mix-val'),
+
+    vstCheckbox: $('vst-enabled-checkbox'),
+    vstPathInput: $('vst-path-input'),
+    vstLoadBtn: $('vst-load-btn'),
+    vstEditorBtn: $('vst-editor-btn'),
 };
 
-// Canvas context setup
+// --- Generic helpers ------------------------------------------------------
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function setText(el, text) {
+    if (el.textContent !== text) el.textContent = text;
+}
+
+function setPressed(el, on) {
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', String(on));
+}
+
+function finiteOrNull(v) {
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+// Single entry point for REST. Throws ApiError carrying the backend's detail message.
+async function api(path, { method = 'GET', body } = {}) {
+    const headers = { 'X-API-Key': API_KEY };
+    const init = { method, headers };
+    if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
+    }
+    const res = await fetch(`${API_BASE}${path}`, init);
+    const text = await res.text();
+    let data = null;
+    if (text) {
+        try {
+            data = JSON.parse(text);
+        } catch {
+            data = text;
+        }
+    }
+    if (!res.ok) {
+        const detail = data && typeof data === 'object' ? data.detail : data;
+        const reason = typeof detail === 'string' && detail ? detail : res.statusText;
+        throw new ApiError(reason ? `${res.status}: ${reason}` : `HTTP ${res.status}`, res.status);
+    }
+    return data;
+}
+
+// --- Toasts ---------------------------------------------------------------
+function showToast(message, variant = 'info', durationMs = 3500) {
+    const region = dom.toastRegion;
+    while (region.children.length >= TOAST_LIMIT) region.firstElementChild.remove();
+
+    const el = document.createElement('div');
+    el.className = `toast toast-${variant}`;
+    el.textContent = message;
+    region.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+
+    setTimeout(() => {
+        el.classList.remove('show');
+        setTimeout(() => el.remove(), 300);
+    }, durationMs);
+}
+
+// --- Formatting -----------------------------------------------------------
+const fmtGain = (v) => `${v.toFixed(2)}x`;
+const fmtPct = (v) => `${v}%`;
+const fmtDb = (v) => `${v} dB`;
+const fmtSignedDb = (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+const fmtMs = (v) => `${v} ms`;
+const fmtRatio = (v) => `${v.toFixed(1)}:1`;
+const fmtHz = (v) => `${v} Hz`;
+
+// --- Range controls -------------------------------------------------------
+// Each slider maps to one setting key. Several sliders may share a key (the Easy and
+// Advanced noise-reduction sliders); they are kept in sync.
+const identity = (v) => v;
+const PERCENT = {
+    toUI: (v) => Math.round(v * 100),
+    toStored: (v) => v / 100,
+};
+
+function range(key, slider, out, fmt, opts = {}) {
+    return { key, slider, out, fmt, toUI: identity, toStored: identity, ...opts };
+}
+
+const RANGE_CONTROLS = [
+    range('input_gain', dom.inputGainSlider, dom.inputGainVal, fmtGain),
+    range('output_gain', dom.outputGainSlider, dom.outputGainVal, fmtGain),
+    range('ns_eco_strength', dom.easyNSSlider, dom.easyNSVal, fmtPct, {
+        ...PERCENT,
+        onInput: () => { if (settings.ns_mode === 'off') setNSMode('eco'); },
+    }),
+    range('ns_eco_strength', dom.nsStrengthSlider, dom.nsStrengthVal, fmtPct, PERCENT),
+    range('gate_threshold_db', dom.gateThreshSlider, dom.gateThreshVal, fmtDb, {
+        onInput: () => updateGateMarker(settings),
+    }),
+    range('gate_release_ms', dom.gateReleaseSlider, dom.gateReleaseVal, fmtMs),
+    range('eq_low_gain_db', dom.eqLowSlider, dom.eqLowVal, fmtSignedDb, { onInput: () => syncToneSlider(settings) }),
+    range('eq_mid_gain_db', dom.eqMidSlider, dom.eqMidVal, fmtSignedDb, { onInput: () => syncToneSlider(settings) }),
+    range('eq_high_gain_db', dom.eqHighSlider, dom.eqHighVal, fmtSignedDb, { onInput: () => syncToneSlider(settings) }),
+    range('compressor_threshold_db', dom.compThreshSlider, dom.compThreshVal, fmtDb),
+    range('compressor_ratio', dom.compRatioSlider, dom.compRatioVal, fmtRatio),
+    range('compressor_attack_ms', dom.compAttackSlider, dom.compAttackVal, fmtMs),
+    range('compressor_release_ms', dom.compReleaseSlider, dom.compReleaseVal, fmtMs),
+    range('deesser_threshold_db', dom.deesserThreshSlider, dom.deesserThreshVal, fmtDb),
+    range('deesser_amount', dom.deesserAmountSlider, dom.deesserAmountVal, fmtPct, PERCENT),
+    range('exciter_frequency', dom.exciterFreqSlider, dom.exciterFreqVal, fmtHz),
+    range('exciter_amount', dom.exciterAmountSlider, dom.exciterAmountVal, fmtPct, PERCENT),
+    range('exciter_mix', dom.exciterMixSlider, dom.exciterMixVal, fmtPct, PERCENT),
+];
+
+function renderRange(c, stored) {
+    const ui = c.toUI(stored);
+    c.slider.value = ui;
+    c.out.textContent = c.fmt(ui);
+}
+
+function bindRange(c) {
+    c.slider.addEventListener('input', () => {
+        const ui = Number(c.slider.value);
+        const stored = c.toStored(ui);
+        c.out.textContent = c.fmt(ui);
+        for (const other of RANGE_CONTROLS) {
+            if (other !== c && other.key === c.key) renderRange(other, stored);
+        }
+        sendThrottled(c.key, stored);
+        if (c.onInput) c.onInput(stored);
+    });
+}
+
+// Checkbox toggles
+const CHECK_CONTROLS = [
+    { key: 'monitor_enabled', el: dom.monitorCheckbox, onChange: () => { dom.monitorSelect.disabled = !settings.monitor_enabled; } },
+    { key: 'gate_enabled', el: dom.gateCheckbox, onChange: () => updateGateMarker(settings) },
+    { key: 'eq_enabled', el: dom.eqCheckbox, onChange: () => syncToneSlider(settings) },
+    { key: 'compressor_enabled', el: dom.compCheckbox },
+    { key: 'deesser_enabled', el: dom.deesserCheckbox },
+    { key: 'exciter_enabled', el: dom.exciterCheckbox },
+    { key: 'vst_enabled', el: dom.vstCheckbox },
+];
+
+const NS_BUTTONS = { off: dom.nsModeOff, eco: dom.nsModeEco, high: dom.nsModeHigh };
+const VIZ_BUTTONS = { spec: dom.vizTabSpec, pulse: dom.vizTabPulse, cascade: dom.vizTabCascade };
+
+// --- Canvas ---------------------------------------------------------------
 const ctx = dom.canvas.getContext('2d');
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
 
 function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1;
+    dpr = window.devicePixelRatio || 1;
     const rect = dom.canvas.getBoundingClientRect();
-    dom.canvas.width = rect.width * dpr;
-    dom.canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    canvasW = rect.width;
+    canvasH = rect.height;
+    dom.canvas.width = Math.max(1, Math.round(canvasW * dpr));
+    dom.canvas.height = Math.max(1, Math.round(canvasH * dpr));
+    // Assigning width/height resets the context, and setTransform replaces the
+    // transform outright. Calling scale() here would compound on every resize.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    barGradient = ctx.createLinearGradient(0, canvasH, 0, 0);
+    barGradient.addColorStop(0, '#00f2fe');
+    barGradient.addColorStop(0.6, '#9d4edd');
+    barGradient.addColorStop(1, '#ff007f');
 }
 
-// --- Initialize App ---
-async function init() {
-    try {
-        await fetchSettings();
-        await fetchDevices();
-        setupEventListeners();
-        connectWebSocket();
-        startVisualizationLoop();
-    } catch (err) {
-        console.error("Initialization error:", err);
+resizeCanvas();
+new ResizeObserver(() => resizeCanvas()).observe(dom.canvas.parentElement);
+window.addEventListener('resize', resizeCanvas);
+
+function startVisualizer() {
+    if (!rafId && !document.hidden) rafId = requestAnimationFrame(drawFrame);
+}
+
+function stopVisualizer() {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopVisualizer();
+    else startVisualizer();
+});
+
+function drawFrame() {
+    rafId = requestAnimationFrame(drawFrame);
+
+    dom.inputMeterFill.style.transform = `scaleX(${dbToPercent(inputLevelSmoothed) / 100})`;
+    dom.outputMeterFill.style.transform = `scaleX(${dbToPercent(outputLevelSmoothed) / 100})`;
+
+    for (let i = 0; i < 64; i++) {
+        smoothedFFT[i] = smoothedFFT[i] * 0.8 + (rawFFTData[i] || 0) * 0.2;
     }
-}
 
-// --- API Services ---
-async function fetchSettings() {
-    const res = await fetch(`${API_BASE}/api/settings`, {
-        headers: { 'X-API-Key': HUSHCORE_API_KEY }
-    });
-    settings = await res.json();
-    applySettingsToUI(settings);
-    detectActivePreset(settings);
-}
+    ctx.fillStyle = '#08080c';
+    ctx.fillRect(0, 0, canvasW, canvasH);
 
-async function fetchDevices() {
-    const res = await fetch(`${API_BASE}/api/devices`, {
-        headers: { 'X-API-Key': HUSHCORE_API_KEY }
-    });
-    devices = await res.json();
-    populateDevices(devices);
-}
-
-function populateDevices(devList) {
-    // Microphone dropdown
-    dom.inputSelect.innerHTML = '';
-    devList.inputs.forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d.name;
-        opt.textContent = d.name;
-        dom.inputSelect.appendChild(opt);
-    });
-    if (settings.input_device) dom.inputSelect.value = settings.input_device;
-    
-    // VB-Cable dropdown
-    dom.outputSelect.innerHTML = '';
-    devList.outputs.forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d.name;
-        opt.textContent = d.name;
-        dom.outputSelect.appendChild(opt);
-    });
-    if (settings.output_device) dom.outputSelect.value = settings.output_device;
-
-    // Monitor select dropdown
-    dom.monitorSelect.innerHTML = '<option value="">Kulaklık Seçin...</option>';
-    devList.outputs.forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d.name;
-        opt.textContent = d.name;
-        dom.monitorSelect.appendChild(opt);
-    });
-    if (settings.monitor_device) dom.monitorSelect.value = settings.monitor_device;
-    
-    updateRoutingWarning();
-}
-
-// Inspect output device selection and show warning
-function updateRoutingWarning() {
-    const selectedOutput = dom.outputSelect.value;
-    if (!selectedOutput) {
-        dom.routingTipBox.textContent = "Çıkış aygıtı seçilmedi.";
-        dom.routingTipBox.className = "warning-banner warning";
-        return;
-    }
-    
-    const outputLower = selectedOutput.toLowerCase();
-    
-    // Check if output is a physical playback device (speakers, headphones, Realtek, etc.)
-    const isPhysical = outputLower.includes('speaker') || 
-                       outputLower.includes('hoparlör') || 
-                       outputLower.includes('headphone') || 
-                       outputLower.includes('kulaklık') || 
-                       outputLower.includes('realtek') || 
-                       outputLower.includes('high definition') || 
-                       (outputLower.includes('audio device') && !outputLower.includes('cable') && !outputLower.includes('virtual'));
-                       
-    if (isPhysical) {
-        dom.routingTipBox.innerHTML = `⚠️ <strong>Uyarı: Hoparlör Çıkışı Seçildi!</strong><br>
-Kendi sesinizi duyarsınız. Discord, Zoom veya OBS ile kullanmak için çıkışı <strong>VB-Cable</strong> gibi sanal bir kabloya yönlendirin.`;
-        dom.routingTipBox.className = "warning-banner warning";
+    if (currentVizMode === 'spec') {
+        drawSpectrum(canvasW, canvasH);
+    } else if (currentVizMode === 'pulse') {
+        drawPulse(canvasW, canvasH);
     } else {
-        dom.routingTipBox.innerHTML = `✅ <strong>Sanal Kablo Aktif</strong><br>
-Ses sanal hatta gönderiliyor. Discord/OBS ses girişi ayarlarından <strong>VB-Cable Output</strong> seçerek kullanabilirsiniz.`;
-        dom.routingTipBox.className = "warning-banner success";
+        cascadeHistory.push(smoothedFFT.slice());
+        if (cascadeHistory.length > maxCascadeFrames) cascadeHistory.shift();
+        drawCascade(canvasW, canvasH);
     }
 }
 
-function updateGateMarkerPosition(threshDb) {
-    if (!dom.gateMarker) return;
-    if (!settings.gate_enabled) {
-        dom.gateMarker.style.display = 'none';
-        return;
-    }
-    dom.gateMarker.style.display = 'block';
-    const pct = dbToPercent(threshDb);
-    dom.gateMarker.style.left = `${pct}%`;
-}
+function drawSpectrum(w, h) {
+    const barCount = 36;
+    const padding = 2.5;
+    const barWidth = (w - (barCount - 1) * padding) / barCount;
 
-// Update the UI fields with current settings values
-function applySettingsToUI(cfg) {
-    // Monitor Checkbox & Device Select state
-    dom.monitorCheckbox.checked = cfg.monitor_enabled;
-    dom.monitorSelect.disabled = !cfg.monitor_enabled;
-    
-    // Gain values & labels
-    dom.inputGainSlider.value = cfg.input_gain;
-    dom.inputGainVal.textContent = `${cfg.input_gain.toFixed(2)}x`;
-    dom.outputGainSlider.value = cfg.output_gain;
-    dom.outputGainVal.textContent = `${cfg.output_gain.toFixed(2)}x`;
-    
-    // Noise Suppression (Advanced & Easy)
-    updateNSModeButtons(cfg.ns_mode);
-    dom.nsStrengthSlider.value = Math.round(cfg.ns_eco_strength * 100);
-    dom.nsStrengthVal.textContent = `${Math.round(cfg.ns_eco_strength * 100)}%`;
-    dom.easyNSSlider.value = Math.round(cfg.ns_eco_strength * 100);
-    dom.easyNSVal.textContent = `${Math.round(cfg.ns_eco_strength * 100)}%`;
-    
-    // Noise Gate
-    dom.gateCheckbox.checked = cfg.gate_enabled;
-    dom.gateThreshSlider.value = cfg.gate_threshold_db;
-    dom.gateThreshVal.textContent = `${cfg.gate_threshold_db} dB`;
-    dom.gateReleaseSlider.value = cfg.gate_release_ms;
-    dom.gateReleaseVal.textContent = `${cfg.gate_release_ms} ms`;
-    updateGateMarkerPosition(cfg.gate_threshold_db);
-    
-    // Equalizer
-    dom.eqCheckbox.checked = cfg.eq_enabled;
-    dom.eqLowSlider.value = cfg.eq_low_gain_db;
-    dom.eqLowVal.textContent = `${cfg.eq_low_gain_db > 0 ? '+' : ''}${cfg.eq_low_gain_db.toFixed(1)} dB`;
-    dom.eqMidSlider.value = cfg.eq_mid_gain_db;
-    dom.eqMidVal.textContent = `${cfg.eq_mid_gain_db > 0 ? '+' : ''}${cfg.eq_mid_gain_db.toFixed(1)} dB`;
-    dom.eqHighSlider.value = cfg.eq_high_gain_db;
-    dom.eqHighVal.textContent = `${cfg.eq_high_gain_db > 0 ? '+' : ''}${cfg.eq_high_gain_db.toFixed(1)} dB`;
-    
-    // Easy mode Voice Tone slider mapping
-    syncEQToToneSlider(cfg);
-    
-    // Compressor
-    dom.compCheckbox.checked = cfg.compressor_enabled;
-    dom.compThreshSlider.value = cfg.compressor_threshold_db;
-    dom.compThreshVal.textContent = `${cfg.compressor_threshold_db} dB`;
-    dom.compRatioSlider.value = cfg.compressor_ratio;
-    dom.compRatioVal.textContent = `${cfg.compressor_ratio.toFixed(1)}:1`;
-    dom.compAttackSlider.value = cfg.compressor_attack_ms;
-    dom.compAttackVal.textContent = `${cfg.compressor_attack_ms} ms`;
-    dom.compReleaseSlider.value = cfg.compressor_release_ms;
-    dom.compReleaseVal.textContent = `${cfg.compressor_release_ms} ms`;
-    
-    // De-Esser
-    dom.deesserCheckbox.checked = cfg.deesser_enabled;
-    dom.deesserThreshSlider.value = cfg.deesser_threshold_db;
-    dom.deesserThreshVal.textContent = `${cfg.deesser_threshold_db} dB`;
-    dom.deesserAmountSlider.value = Math.round(cfg.deesser_amount * 100);
-    dom.deesserAmountVal.textContent = `${Math.round(cfg.deesser_amount * 100)}%`;
+    for (let i = 0; i < barCount; i++) {
+        const val = smoothedFFT[Math.floor((i / barCount) * 40)] || 0;
+        const barHeight = Math.max(2, val * (h - 15));
+        const x = i * (barWidth + padding);
+        const y = h - barHeight;
 
-    // Vocal Exciter
-    dom.exciterFreqSlider.value = cfg.exciter_frequency;
-    dom.exciterFreqVal.textContent = `${cfg.exciter_frequency} Hz`;
-    dom.exciterAmountSlider.value = Math.round(cfg.exciter_amount * 100);
-    dom.exciterAmountVal.textContent = `${Math.round(cfg.exciter_amount * 100)}%`;
-    dom.exciterMixSlider.value = Math.round(cfg.exciter_mix * 100);
-    dom.exciterMixVal.textContent = `${Math.round(cfg.exciter_mix * 100)}%`;
-    
-    // VST3 Hosting
-    dom.vstCheckbox.checked = cfg.vst_enabled;
-    dom.vstPathInput.value = cfg.vst_path || "";
-    
-    // Latency Buffer size
-    dom.bufferSizeSelect.value = cfg.buffer_size || "auto";
-}
+        ctx.fillStyle = barGradient;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(x, y, barWidth, barHeight, [2, 2, 0, 0]);
+        else ctx.rect(x, y, barWidth, barHeight);
+        ctx.fill();
 
-function updateNSModeButtons(mode) {
-    dom.nsModeOff.classList.remove('active');
-    dom.nsModeEco.classList.remove('active');
-    dom.nsModeHigh.classList.remove('active');
-    
-    if (mode === 'off') dom.nsModeOff.classList.add('active');
-    if (mode === 'eco') dom.nsModeEco.classList.add('active');
-    if (mode === 'high') dom.nsModeHigh.classList.add('active');
-}
-
-// --- WebSocket Services ---
-function connectWebSocket() {
-    socket = new WebSocket(WS_URL);
-    
-    socket.onopen = () => {
-        dom.connIndicator.classList.remove('disconnected');
-        dom.connIndicator.classList.add('connected');
-        dom.connIndicator.textContent = 'CONNECTED';
-    };
-    
-    socket.onmessage = (event) => {
-        const metrics = JSON.parse(event.data);
-        updateUIWithMetrics(metrics);
-    };
-    
-    socket.onclose = () => {
-        dom.connIndicator.classList.remove('connected');
-        dom.connIndicator.classList.add('disconnected');
-        dom.connIndicator.textContent = 'DISCONNECTED (RETRYING...)';
-        setTimeout(connectWebSocket, 3000);
-    };
-    
-    socket.onerror = (err) => {
-        console.error("WebSocket Error:", err);
-    };
-}
-
-function sendConfigChange(key, value) {
-    settings[key] = value;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-            action: 'update_setting',
-            key: key,
-            value: value
-        }));
-    } else {
-        fetch(`${API_BASE}/api/settings`, {
-            method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json',
-                'X-API-Key': HUSHCORE_API_KEY
-            },
-            body: JSON.stringify({ key, value })
-        }).catch(err => console.error("REST update failed:", err));
-    }
-}
-
-function sendBulkConfig(updates) {
-    Object.keys(updates).forEach(key => {
-        settings[key] = updates[key];
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                action: 'update_setting',
-                key: key,
-                value: updates[key]
-            }));
+        // Peak cap; a solid fill is cheaper than a shadow blur on every bar.
+        if (val > 0.45) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(x, y, barWidth, 1.5);
         }
-    });
+    }
 }
 
-function updateUIWithMetrics(m) {
-    // Engine State Display
-    if (m.is_running) {
-        dom.engineStatus.textContent = 'RUNNING';
-        dom.engineStatus.className = 'status-value status-running';
-        dom.powerBtn.innerHTML = '🛑 STOP ENGINE';
-        dom.powerBtn.className = 'power-button power-running';
-    } else {
-        dom.engineStatus.textContent = 'STOPPED';
-        dom.engineStatus.className = 'status-value status-stopped';
-        dom.powerBtn.innerHTML = '⚡ START ENGINE';
-        dom.powerBtn.className = 'power-button';
-    }
-    
-    // AI Status Display
-    if (m.df_available) {
-        dom.aiStatus.textContent = 'ACTIVE';
-        dom.aiStatus.className = 'status-value status-available';
-        dom.dfInfo.innerHTML = "HQ AI Modu Aktif! DeepFilterNet arka planda CPU üzerinde çalışıyor.";
-        dom.dfInfo.style.borderColor = "rgba(0, 242, 254, 0.3)";
-    } else {
-        dom.aiStatus.textContent = 'UNAVAILABLE';
-        dom.aiStatus.className = 'status-value status-unavailable';
-        dom.dfInfo.innerHTML = "HQ AI kullanılamıyor (PyTorch eksik). Eco DSP modu devrede.";
-        dom.dfInfo.style.borderColor = "rgba(255, 0, 127, 0.2)";
+// Not a real waveform: the backend sends FFT bins only, so this is driven by band energy.
+function drawPulse(w, h) {
+    const centerY = h / 2;
+    const points = 80;
+
+    let energy = smoothedFFT.reduce((a, b) => a + b, 0) / 64;
+    if (!gateOpen) energy = 0;
+    const time = reduceMotion.matches ? 0 : Date.now() * 0.015;
+
+    ctx.beginPath();
+    for (let i = 0; i < points; i++) {
+        const x = (i / (points - 1)) * w;
+        let displacement = 0;
+        if (energy > 0.04) {
+            displacement =
+                Math.sin(i * 0.2 + time) * 10 * (smoothedFFT[4] || 0.1) +
+                Math.sin(i * 0.4 - time * 1.2) * 6 * (smoothedFFT[10] || 0.1);
+            const taper = Math.sin((i / (points - 1)) * Math.PI);
+            displacement *= taper * (energy * 2.0);
+        }
+        const y = centerY + displacement;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
     }
 
-    // Gate Status Display
-    isGateOpen = m.gate_state;
-    if (isGateOpen) {
-        dom.gateLed.className = 'led led-open';
-        dom.gateText.textContent = 'OPEN (TRANSMITTING)';
-        dom.gateText.style.color = 'var(--neon-green)';
-    } else {
-        dom.gateLed.className = 'led led-closed';
-        dom.gateText.textContent = 'MUTED (GATE CLOSED)';
-        dom.gateText.style.color = 'var(--neon-pink)';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0, 242, 254, 0.2)';
+    ctx.stroke();
+
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#00f2fe';
+    ctx.stroke();
+}
+
+function drawCascade(w, h) {
+    if (cascadeHistory.length === 0) return;
+
+    const points = 36;
+    const stepX = w / (points - 1);
+    const offsetX = 0.8;
+    const offsetY = 2.2;
+
+    for (let f = 0; f < cascadeHistory.length; f++) {
+        const fftFrame = cascadeHistory[f];
+        const pct = f / (cascadeHistory.length - 1); // 0 = oldest, 1 = newest
+
+        const startXOffset = (cascadeHistory.length - 1 - f) * offsetX;
+        const startYOffset = (cascadeHistory.length - 1 - f) * offsetY;
+
+        ctx.beginPath();
+        for (let i = 0; i < points; i++) {
+            const x = startXOffset + i * stepX * 0.95;
+            const amplitude = (fftFrame[i] || 0) * (h * 0.35);
+            const y = (h - 10) - startYOffset - amplitude;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+
+        ctx.lineWidth = 1 + pct * 0.8;
+        const alpha = 0.08 + pct * 0.5;
+        const hue = 180 + (1 - pct) * 120; // neon cyan to neon purple
+        ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha})`;
+        ctx.stroke();
     }
-    
-    // Update live metrics values (damped)
-    inputLevelSmoothed = inputLevelSmoothed * 0.7 + m.input_rms * 0.3;
-    outputLevelSmoothed = outputLevelSmoothed * 0.7 + m.output_rms * 0.3;
-    
-    rawFFTData = m.fft_data;
-    
-    // VST Status
-    isVstLoaded = m.vst_loaded || false;
-    isVstFailed = m.vst_failed || false;
+}
+
+function setVizMode(mode) {
+    currentVizMode = mode;
+    for (const [name, btn] of Object.entries(VIZ_BUTTONS)) setPressed(btn, name === mode);
 }
 
 function dbToPercent(db) {
@@ -458,619 +477,637 @@ function dbToPercent(db) {
     return ((db + 60) / 60) * 100;
 }
 
-// --- Presets Settings ---
-function applyPreset(presetId) {
-    let updates = {};
-    
-    // Clear active preset buttons
-    dom.presetOff.classList.remove('active');
-    dom.presetVoice.classList.remove('active');
-    dom.presetGaming.classList.remove('active');
-    dom.presetBroadcaster.classList.remove('active');
-    
-    if (presetId === 'off') {
-        dom.presetOff.classList.add('active');
-        updates = {
-            ns_mode: 'off',
-            gate_enabled: false,
-            eq_enabled: false,
-            compressor_enabled: false,
-            deesser_enabled: false,
-            exciter_enabled: false,
-            vst_enabled: false
-        };
-    } 
-    else if (presetId === 'voice') {
-        dom.presetVoice.classList.add('active');
-        updates = {
-            ns_mode: 'eco',
-            ns_eco_strength: 0.8,
-            gate_enabled: true,
-            gate_threshold_db: -48.0,
-            gate_release_ms: 150.0,
-            eq_enabled: true,
-            eq_low_gain_db: 0.0,
-            eq_mid_gain_db: 0.0,
-            eq_high_gain_db: 0.0,
-            compressor_enabled: true,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 100.0,
-            deesser_enabled: false,
-            exciter_enabled: false,
-            vst_enabled: false
-        };
-    } 
-    else if (presetId === 'gaming') {
-        dom.presetGaming.classList.add('active');
-        updates = {
-            ns_mode: 'eco',
-            ns_eco_strength: 0.9,
-            gate_enabled: true,
-            gate_threshold_db: -38.0, // High threshold for mechanical key clicks
-            gate_release_ms: 100.0,
-            eq_enabled: true,
-            eq_low_gain_db: -2.0,
-            eq_mid_gain_db: 2.0,
-            eq_high_gain_db: 1.0,
-            compressor_enabled: true,
-            compressor_threshold_db: -14.0,
-            compressor_ratio: 3.5,
-            compressor_attack_ms: 5.0,
-            compressor_release_ms: 80.0,
-            deesser_enabled: false,
-            exciter_enabled: false,
-            vst_enabled: false
-        };
-    } 
-    else if (presetId === 'broadcaster') {
-        dom.presetBroadcaster.classList.add('active');
-        updates = {
-            ns_mode: 'eco',
-            ns_eco_strength: 0.75,
-            gate_enabled: true,
-            gate_threshold_db: -50.0,
-            gate_release_ms: 200.0,
-            eq_enabled: true,
-            eq_low_gain_db: 4.5,
-            eq_mid_gain_db: 1.0,
-            eq_high_gain_db: 3.0,
-            compressor_enabled: true,
-            compressor_threshold_db: -22.0,
-            compressor_ratio: 4.0,
-            compressor_attack_ms: 12.0,
-            compressor_release_ms: 120.0,
-            deesser_enabled: true,
-            deesser_threshold_db: -25.0,
-            deesser_amount: 0.5,
-            exciter_enabled: true,
-            exciter_frequency: 3000.0,
-            exciter_amount: 0.2,
-            exciter_mix: 0.15,
-            vst_enabled: false
-        };
-    }
-    
-    sendBulkConfig(updates);
-    
-    // Update visualizers
-    setTimeout(() => {
-        applySettingsToUI(Object.assign({}, settings, updates));
-    }, 50);
+// --- Data loading ---------------------------------------------------------
+async function fetchSettings() {
+    settings = await api('/api/settings');
+    applySettingsToUI(settings);
 }
 
-function detectActivePreset(cfg) {
-    dom.presetOff.classList.remove('active');
-    dom.presetVoice.classList.remove('active');
-    dom.presetGaming.classList.remove('active');
-    dom.presetBroadcaster.classList.remove('active');
-    
-    if (cfg.ns_mode === 'off' && !cfg.gate_enabled && !cfg.eq_enabled && !cfg.compressor_enabled) {
-        dom.presetOff.classList.add('active');
-    } 
-    else if (cfg.ns_mode === 'eco' && cfg.gate_enabled && cfg.gate_threshold_db === -38.0) {
-        dom.presetGaming.classList.add('active');
-    } 
-    else if (cfg.eq_low_gain_db === 4.5 && cfg.compressor_threshold_db === -22.0) {
-        dom.presetBroadcaster.classList.add('active');
-    } 
-    else if (cfg.ns_mode === 'eco' || cfg.ns_mode === 'high') {
-        dom.presetVoice.classList.add('active');
-    } 
-    else {
-        dom.presetOff.classList.add('active');
+async function fetchDevices() {
+    populateDevices(await api('/api/devices'));
+}
+
+async function fetchPresets() {
+    const data = await api('/api/presets');
+    presets = { builtin: data.builtin || {}, user: data.user || {} };
+    renderUserPresets();
+}
+
+async function loadAll() {
+    const failures = [];
+    const steps = [['settings', fetchSettings], ['devices', fetchDevices], ['presets', fetchPresets]];
+    for (const [name, load] of steps) {
+        try {
+            await load();
+        } catch (err) {
+            console.error(`Failed to load ${name}:`, err);
+            failures.push(name);
+        }
+    }
+    if (failures.length) {
+        showToast(`Could not load ${failures.join(', ')}. Check that HushCore is running.`, 'error', 6000);
     }
 }
 
-// Map Voice Tone slider values (0, 1, 2)
-function applyVoiceToneSlider(val) {
-    let label = "Doğal (Natural)";
-    let updates = { eq_enabled: true };
-    
-    if (val === 0) {
-        label = "Sıcak (Warm)";
-        updates.eq_low_gain_db = 4.0;
-        updates.eq_mid_gain_db = 0.5;
-        updates.eq_high_gain_db = -3.0;
-    } else if (val === 1) {
-        label = "Doğal (Natural)";
-        updates.eq_low_gain_db = 0.0;
-        updates.eq_mid_gain_db = 0.0;
-        updates.eq_high_gain_db = 0.0;
-    } else if (val === 2) {
-        label = "Parlak (Bright)";
-        updates.eq_low_gain_db = -2.0;
-        updates.eq_mid_gain_db = 1.0;
-        updates.eq_high_gain_db = 4.5;
-    }
-    
-    dom.easyToneVal.textContent = label;
-    sendBulkConfig(updates);
-    
-    setTimeout(() => {
-        applySettingsToUI(Object.assign({}, settings, updates));
-    }, 50);
+// --- Devices & routing ----------------------------------------------------
+function fillSelect(select, items, placeholder) {
+    const nodes = [];
+    if (placeholder !== undefined) nodes.push(new Option(placeholder, ''));
+    for (const d of items) nodes.push(new Option(d.name, d.name));
+    select.replaceChildren(...nodes);
 }
 
-function syncEQToToneSlider(cfg) {
-    if (!cfg.eq_enabled) {
-        dom.easyToneSlider.value = 1;
-        dom.easyToneVal.textContent = "Doğal (Natural)";
+function populateDevices(list) {
+    fillSelect(dom.inputSelect, list.inputs, 'System default microphone');
+    if (settings.input_device) dom.inputSelect.value = settings.input_device;
+
+    fillSelect(dom.outputSelect, list.outputs, 'Auto (virtual cable if installed)');
+    if (settings.output_device) dom.outputSelect.value = settings.output_device;
+
+    fillSelect(dom.monitorSelect, list.outputs, 'Select headphones...');
+    if (settings.monitor_device) dom.monitorSelect.value = settings.monitor_device;
+
+    updateRoutingWarning();
+}
+
+function isVirtualOutput(name) {
+    const lower = name.toLowerCase();
+    return VIRTUAL_OUTPUT_HINTS.some((hint) => lower.includes(hint));
+}
+
+function setRoutingBanner(variant, title, body) {
+    const box = dom.routingTipBox;
+    box.className = `warning-banner ${variant}`;
+    box.replaceChildren();
+    if (title) {
+        const strong = document.createElement('strong');
+        strong.textContent = title;
+        box.append(strong, document.createElement('br'));
+    }
+    box.append(body);
+}
+
+function updateRoutingWarning() {
+    const selected = dom.outputSelect.value;
+    if (!selected) {
+        setRoutingBanner('warning', 'Automatic output.', 'HushCore uses a virtual cable if one is installed, otherwise your default speakers. Pick CABLE Input to be sure.');
         return;
     }
-    
-    if (cfg.eq_low_gain_db > 2.0 && cfg.eq_high_gain_db < -1.0) {
-        dom.easyToneSlider.value = 0;
-        dom.easyToneVal.textContent = "Sıcak (Warm)";
-    } else if (cfg.eq_low_gain_db < 0.0 && cfg.eq_high_gain_db > 2.0) {
-        dom.easyToneSlider.value = 2;
-        dom.easyToneVal.textContent = "Parlak (Bright)";
+    if (isVirtualOutput(selected)) {
+        setRoutingBanner(
+            'success',
+            'Virtual cable active.',
+            'Audio is sent to the virtual cable. In Discord or OBS, choose "VB-Cable Output" as the microphone.'
+        );
     } else {
-        dom.easyToneSlider.value = 1;
-        dom.easyToneVal.textContent = "Doğal (Natural)";
+        setRoutingBanner(
+            'warning',
+            'Not a virtual cable.',
+            'Other apps will not receive this audio, and a speaker output lets you hear yourself. To use HushCore in Discord, Zoom or OBS, route the output to a virtual cable such as VB-Cable.'
+        );
     }
 }
 
-// --- Setup User Events Listeners ---
-function setupEventListeners() {
-    // Mode toggles (EASY vs ADVANCED)
-    dom.viewModeSimple.onclick = () => {
-        dom.viewModeSimple.classList.add('active');
-        dom.viewModeAdv.classList.remove('active');
-        dom.appWrapper.classList.remove('mode-adv');
-        dom.appWrapper.classList.add('mode-simple');
-        resizeCanvas();
+// --- Settings writes ------------------------------------------------------
+function reportSaveFailure(key, err) {
+    console.error(`Failed to save ${key}:`, err);
+    // Slider drags can fail many times in a row; one toast per burst is enough.
+    const now = Date.now();
+    if (now - lastSaveErrorAt > 5000) {
+        lastSaveErrorAt = now;
+        showToast('Could not save a setting. Check the connection to HushCore.', 'error');
+    }
+}
+
+// Prefers the open socket. Falls back to REST so changes made while the socket is down are not lost.
+function sendSettingUpdate(key, value) {
+    if (socket && socketReady && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'update_setting', key, value }));
+        return Promise.resolve();
+    }
+    return api('/api/settings', { method: 'POST', body: { key, value } });
+}
+
+function pushSetting(key, value) {
+    sendSettingUpdate(key, value).catch((err) => reportSaveFailure(key, err));
+}
+
+function sendConfigChange(key, value) {
+    settings[key] = value;
+    updateActivePreset();
+    pushSetting(key, value);
+}
+
+// Slider updates: sends the first change at once, then at most one message per interval,
+// always carrying the latest value.
+function sendThrottled(key, value) {
+    settings[key] = value;
+    updateActivePreset();
+
+    let slot = throttles.get(key);
+    if (!slot) {
+        slot = { timer: null, pending: false, latest: value };
+        throttles.set(key, slot);
+    }
+    slot.latest = value;
+
+    if (slot.timer) {
+        slot.pending = true;
+        return;
+    }
+
+    pushSetting(key, value);
+    const flush = () => {
+        if (slot.pending) {
+            slot.pending = false;
+            pushSetting(key, slot.latest);
+            slot.timer = setTimeout(flush, SETTING_SEND_INTERVAL_MS);
+        } else {
+            slot.timer = null;
+        }
     };
-    
-    dom.viewModeAdv.onclick = () => {
-        dom.viewModeAdv.classList.add('active');
-        dom.viewModeSimple.classList.remove('active');
-        dom.appWrapper.classList.remove('mode-simple');
-        dom.appWrapper.classList.add('mode-adv');
-        resizeCanvas();
+    slot.timer = setTimeout(flush, SETTING_SEND_INTERVAL_MS);
+}
+
+function sendBulkConfig(updates) {
+    Object.assign(settings, updates);
+    updateActivePreset();
+    for (const [key, value] of Object.entries(updates)) pushSetting(key, value);
+}
+
+// --- WebSocket ------------------------------------------------------------
+function setConnectionState(connected, label = connected ? 'CONNECTED' : 'DISCONNECTED - RETRYING') {
+    dom.connIndicator.classList.toggle('connected', connected);
+    dom.connIndicator.classList.toggle('disconnected', !connected);
+    setText(dom.connIndicator, label);
+}
+
+function connectWebSocket() {
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+
+    const ws = new WebSocket(WS_URL);
+    socket = ws;
+    socketReady = false;
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ action: 'auth', token: API_KEY }));
     };
 
-    // Studio FX rack tab panel clicks
-    const tabButtons = document.querySelectorAll('#fx-tabs .tab-btn');
-    tabButtons.forEach(btn => {
-        btn.onclick = () => {
-            tabButtons.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            
-            const panels = document.querySelectorAll('.tab-panel');
-            panels.forEach(p => p.classList.remove('active'));
-            
-            const targetId = btn.getAttribute('data-target');
-            const targetPanel = document.getElementById(targetId);
-            if (targetPanel) {
-                targetPanel.classList.add('active');
+    let authenticated = false;
+    ws.onmessage = (event) => {
+        let msg;
+        try {
+            msg = JSON.parse(event.data);
+        } catch {
+            return;
+        }
+        if (!authenticated) {
+            if (msg && msg.action === 'auth_ok' && socket === ws) {
+                authenticated = true;
+                socketReady = true;
+                reconnectDelay = WS_RETRY_MIN_MS;
+                setConnectionState(true);
             }
-        };
+            return;
+        }
+        updateUIWithMetrics(msg);
+    };
+
+    ws.onclose = (event) => {
+        if (socket !== ws) return;
+        socket = null;
+        socketReady = false;
+        if (event.code === WS_AUTH_FAILED_CODE) {
+            // The key will not change until the page reloads, so retrying would only spam the server.
+            setConnectionState(false, WS_AUTH_FAILED_LABEL);
+            return;
+        }
+        setConnectionState(false);
+        scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+        console.warn('HushCore WebSocket error. Reconnecting.');
+    };
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWebSocket();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, WS_RETRY_MAX_MS);
+}
+
+// --- Live metrics ---------------------------------------------------------
+function updateUIWithMetrics(m) {
+    setEngineState(Boolean(m.is_running));
+    setAiState(Boolean(m.df_available));
+    setGateState(Boolean(m.gate_state));
+
+    inputLevelSmoothed = inputLevelSmoothed * 0.7 + (m.input_rms ?? -60) * 0.3;
+    outputLevelSmoothed = outputLevelSmoothed * 0.7 + (m.output_rms ?? -60) * 0.3;
+
+    if (Array.isArray(m.fft_data)) rawFFTData.splice(0, rawFFTData.length, ...m.fft_data);
+
+    isVstFailed = Boolean(m.vst_failed);
+
+    updateStatusStrip(m);
+    if (m.clipping === true) flashClip();
+}
+
+function setEngineState(running) {
+    if (running === engineRunning) return;
+    engineRunning = running;
+    dom.engineStatus.textContent = running ? 'RUNNING' : 'STOPPED';
+    dom.engineStatus.className = `status-value ${running ? 'status-running' : 'status-stopped'}`;
+    dom.powerBtn.textContent = running ? 'STOP ENGINE' : 'START ENGINE';
+    dom.powerBtn.classList.toggle('power-running', running);
+}
+
+function setAiState(available) {
+    if (available === aiAvailable) return;
+    aiAvailable = available;
+    dom.aiStatus.textContent = available ? 'ACTIVE' : 'UNAVAILABLE';
+    dom.aiStatus.className = `status-value ${available ? 'status-available' : 'status-unavailable'}`;
+    dom.dfInfo.textContent = available
+        ? 'HQ AI is active. DeepFilterNet runs on the CPU.'
+        : 'HQ AI is unavailable (PyTorch not installed). Eco DSP is in use.';
+    dom.dfInfo.classList.toggle('ok', available);
+    dom.dfInfo.classList.toggle('off', !available);
+}
+
+function setGateState(open) {
+    if (open === gateOpen) return;
+    gateOpen = open;
+    dom.gateLed.className = `led ${open ? 'led-open' : 'led-closed'}`;
+    dom.gateText.textContent = open ? 'OPEN (TRANSMITTING)' : 'MUTED (GATE CLOSED)';
+    dom.gateText.className = open ? 'gate-open' : 'gate-closed';
+}
+
+function updateStatusStrip(m) {
+    const rate = finiteOrNull(m.sample_rate);
+    const latency = finiteOrNull(m.latency_ms);
+    const cpu = finiteOrNull(m.cpu_load);
+
+    setText(dom.statusRate, rate && rate > 0 ? `${(rate / 1000).toFixed(1).replace(/\.0$/, '')} kHz` : '-- kHz');
+    setText(dom.statusLatency, latency !== null ? `${Math.round(latency)} ms` : '-- ms');
+    setText(dom.statusCpu, cpu !== null ? `CPU ${Math.round(Math.min(100, Math.max(0, cpu)))}%` : 'CPU --');
+}
+
+function flashClip() {
+    dom.clipIndicator.classList.add('lit');
+    clearTimeout(clipTimer);
+    clipTimer = setTimeout(() => dom.clipIndicator.classList.remove('lit'), CLIP_HOLD_MS);
+}
+
+// --- Applying settings to the UI -----------------------------------------
+function applySettingsToUI(cfg = settings) {
+    for (const c of CHECK_CONTROLS) {
+        if (cfg[c.key] !== undefined) c.el.checked = Boolean(cfg[c.key]);
+    }
+    for (const c of RANGE_CONTROLS) {
+        if (cfg[c.key] !== undefined) renderRange(c, cfg[c.key]);
+    }
+
+    dom.monitorSelect.disabled = !cfg.monitor_enabled;
+    updateNSModeButtons(cfg.ns_mode);
+    updateGateMarker(cfg);
+    syncToneSlider(cfg);
+
+    if (cfg.vst_path !== undefined) dom.vstPathInput.value = cfg.vst_path || '';
+    if (cfg.buffer_size !== undefined) dom.bufferSizeSelect.value = String(cfg.buffer_size);
+
+    updateActivePreset();
+}
+
+function updateGateMarker(cfg) {
+    const threshold = finiteOrNull(cfg.gate_threshold_db);
+    dom.gateMarker.hidden = !cfg.gate_enabled || threshold === null;
+    if (!dom.gateMarker.hidden) dom.gateMarker.style.left = `${dbToPercent(threshold)}%`;
+}
+
+function updateNSModeButtons(mode) {
+    for (const [name, btn] of Object.entries(NS_BUTTONS)) setPressed(btn, name === mode);
+}
+
+function setNSMode(mode) {
+    updateNSModeButtons(mode);
+    sendConfigChange('ns_mode', mode);
+}
+
+// Easy-mode tone slider reflects the EQ shape; the tone steps are the same values applied on change.
+function syncToneSlider(cfg) {
+    let idx = 1;
+    if (cfg.eq_enabled) {
+        if (cfg.eq_low_gain_db > 2.0 && cfg.eq_high_gain_db < -1.0) idx = 0;
+        else if (cfg.eq_low_gain_db < 0.0 && cfg.eq_high_gain_db > 2.0) idx = 2;
+    }
+    dom.easyToneSlider.value = idx;
+    setText(dom.easyToneVal, TONE_STEPS[idx].label);
+}
+
+function applyToneStep(idx) {
+    const step = TONE_STEPS[idx];
+    if (!step) return;
+    sendBulkConfig({
+        eq_enabled: true,
+        eq_low_gain_db: step.low,
+        eq_mid_gain_db: step.mid,
+        eq_high_gain_db: step.high,
+    });
+    applySettingsToUI(settings);
+}
+
+// --- Presets --------------------------------------------------------------
+function valuesEqual(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= FLOAT_TOLERANCE;
+    return a === b;
+}
+
+function presetMatches(values) {
+    const keys = Object.keys(values);
+    return keys.length > 0 && keys.every((k) => valuesEqual(settings[k], values[k]));
+}
+
+function findActivePreset() {
+    for (const name of Object.keys(presets.builtin)) {
+        if (presetMatches(presets.builtin[name])) return `builtin:${name}`;
+    }
+    for (const name of Object.keys(presets.user)) {
+        if (presetMatches(presets.user[name])) return `user:${name}`;
+    }
+    return null;
+}
+
+function updateActivePreset() {
+    const active = findActivePreset();
+    document.querySelectorAll('[data-preset]').forEach((btn) => {
+        setPressed(btn, active === `builtin:${btn.dataset.preset}`);
+    });
+    dom.userPresetList.querySelectorAll('[data-user-preset]').forEach((btn) => {
+        setPressed(btn, active === `user:${btn.dataset.userPreset}`);
+    });
+}
+
+async function applyPreset(name) {
+    try {
+        const data = await api('/api/presets/apply', { method: 'POST', body: { name } });
+        // Drop slider values queued before the preset landed, or they would overwrite it.
+        throttles.forEach((slot) => { slot.pending = false; });
+        settings = data && data.settings ? data.settings : await api('/api/settings');
+        applySettingsToUI(settings);
+        showToast(`"${BUILTIN_LABELS[name] || name}" preset applied.`);
+    } catch (err) {
+        console.error('Apply preset failed:', err);
+        showToast(`Could not apply preset: ${err.message}`, 'error', 5000);
+    }
+}
+
+function renderUserPresets() {
+    disarmDelete();
+    dom.userPresetList.replaceChildren();
+
+    const names = Object.keys(presets.user).sort((a, b) => a.localeCompare(b));
+    if (names.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'presets-empty';
+        empty.textContent = 'No saved presets yet.';
+        dom.userPresetList.append(empty);
+    }
+
+    for (const name of names) {
+        const chip = document.createElement('div');
+        chip.className = 'preset-chip';
+
+        const apply = document.createElement('button');
+        apply.type = 'button';
+        apply.className = 'chip-apply';
+        apply.textContent = name;
+        apply.title = `Apply "${name}"`;
+        apply.dataset.userPreset = name;
+        apply.addEventListener('click', () => applyPreset(name));
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'chip-delete';
+        remove.textContent = '×';
+        remove.setAttribute('aria-label', `Delete preset ${name}`);
+        remove.title = `Delete "${name}"`;
+        remove.addEventListener('click', () => onDeleteClick(remove, name));
+
+        chip.append(apply, remove);
+        dom.userPresetList.append(chip);
+    }
+
+    updateActivePreset();
+}
+
+// Delete takes two clicks: the first arms the button, the second confirms.
+function onDeleteClick(btn, name) {
+    if (armedDelete && armedDelete.btn === btn) {
+        const confirmed = armedDelete.name;
+        disarmDelete();
+        deleteUserPreset(confirmed);
+        return;
+    }
+    disarmDelete();
+    armedDelete = {
+        btn,
+        name,
+        timer: setTimeout(disarmDelete, DELETE_ARM_MS),
+    };
+    btn.classList.add('armed');
+    btn.textContent = 'Sure?';
+    btn.setAttribute('aria-label', `Confirm delete preset ${name}`);
+}
+
+function disarmDelete() {
+    if (!armedDelete) return;
+    clearTimeout(armedDelete.timer);
+    const { btn, name } = armedDelete;
+    btn.classList.remove('armed');
+    btn.textContent = '×';
+    btn.setAttribute('aria-label', `Delete preset ${name}`);
+    armedDelete = null;
+}
+
+async function deleteUserPreset(name) {
+    try {
+        await api(`/api/presets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        showToast(`Preset "${name}" deleted.`);
+        await fetchPresets();
+    } catch (err) {
+        console.error('Delete preset failed:', err);
+        showToast(`Could not delete preset: ${err.message}`, 'error', 5000);
+    }
+}
+
+async function saveCurrentAsPreset(event) {
+    event.preventDefault();
+    const name = dom.savePresetInput.value.trim();
+    if (name.length < 1 || name.length > 32) {
+        showToast('Preset names must be 1 to 32 characters.', 'error');
+        dom.savePresetInput.focus();
+        return;
+    }
+
+    dom.savePresetBtn.disabled = true;
+    try {
+        await api('/api/presets', { method: 'POST', body: { name } });
+        dom.savePresetInput.value = '';
+        showToast(`Preset "${name}" saved.`);
+        await fetchPresets();
+    } catch (err) {
+        console.error('Save preset failed:', err);
+        showToast(`Could not save preset: ${err.message}`, 'error', 5000);
+    } finally {
+        dom.savePresetBtn.disabled = false;
+    }
+}
+
+// --- Engine, devices, VST actions -----------------------------------------
+async function togglePower() {
+    if (powerBusy) return;
+    const starting = !engineRunning;
+    powerBusy = true;
+    dom.powerBtn.disabled = true;
+    try {
+        await api(starting ? '/api/start' : '/api/stop', { method: 'POST' });
+        fetchSettings().catch((err) => console.error('Settings refresh failed:', err));
+    } catch (err) {
+        console.error('Engine toggle failed:', err);
+        showToast(
+            starting ? 'Could not start the audio engine. Check your audio devices.' : 'Could not stop the audio engine.',
+            'error',
+            5000
+        );
+    } finally {
+        powerBusy = false;
+        dom.powerBtn.disabled = false;
+    }
+}
+
+async function refreshDevices() {
+    dom.refreshDevicesBtn.classList.add('spinning');
+    try {
+        await fetchDevices();
+    } catch (err) {
+        console.error('Device refresh failed:', err);
+        showToast('Could not refresh audio devices.', 'error');
+    } finally {
+        setTimeout(() => dom.refreshDevicesBtn.classList.remove('spinning'), 450);
+    }
+}
+
+async function loadVst() {
+    const path = dom.vstPathInput.value.trim();
+    if (!path) {
+        showToast('Enter the path to a .vst3 file first.', 'error');
+        return;
+    }
+    sendConfigChange('vst_path', path);
+    showToast('Loading VST3 plugin...', 'info', 2000);
+
+    // The backend loads the plugin off the request path and returns no acknowledgement,
+    // so the result is read back from settings after a short wait.
+    await delay(1500);
+    try {
+        await fetchSettings();
+    } catch (err) {
+        console.error('Settings refresh failed:', err);
+    }
+    if (settings.vst_enabled && settings.vst_path && !isVstFailed) {
+        showToast('VST3 plugin loaded.', 'success');
+    } else {
+        showToast('VST3 plugin failed to load. Check the file path.', 'error', 5000);
+    }
+}
+
+async function openVstEditor() {
+    try {
+        await api('/api/vst/show-editor', { method: 'POST' });
+    } catch (err) {
+        console.error('Failed to show VST editor:', err);
+        showToast('Could not open the plugin editor.', 'error');
+    }
+}
+
+// --- Event wiring ---------------------------------------------------------
+function setViewMode(mode) {
+    dom.appWrapper.classList.toggle('mode-simple', mode === 'simple');
+    dom.appWrapper.classList.toggle('mode-adv', mode === 'adv');
+    setPressed(dom.viewModeSimple, mode === 'simple');
+    setPressed(dom.viewModeAdv, mode === 'adv');
+}
+
+function setupEventListeners() {
+    dom.viewModeSimple.addEventListener('click', () => setViewMode('simple'));
+    dom.viewModeAdv.addEventListener('click', () => setViewMode('adv'));
+
+    const fxButtons = Array.from(dom.fxTabs.querySelectorAll('.tab-btn'));
+    fxButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            fxButtons.forEach((b) => setPressed(b, b === btn));
+            document.querySelectorAll('.tab-panel').forEach((p) => {
+                p.classList.toggle('active', p.id === btn.dataset.target);
+            });
+        });
     });
 
-    // Toggle Audio Pipeline engine power
-    dom.powerBtn.onclick = async () => {
-        const isRunning = dom.engineStatus.textContent === 'RUNNING';
-        const route = isRunning ? '/api/stop' : '/api/start';
-        
-        try {
-            const res = await fetch(`${API_BASE}${route}`, { 
-                method: 'POST',
-                headers: { 'X-API-Key': HUSHCORE_API_KEY }
-            });
-            if (res.ok) {
-                await fetchSettings();
-            } else {
-                alert("Ses motoru başlatılamadı. Ses aygıtlarını kontrol edin.");
-            }
-        } catch (e) {
-            console.error("Power toggle error", e);
-        }
-    };
-    
-    // Refresh audio devices button click handler
-    dom.refreshDevicesBtn.onclick = async () => {
-        dom.refreshDevicesBtn.classList.add('spinning');
-        try {
-            await fetchDevices();
-        } catch (e) {
-            console.error("Failed to refresh devices", e);
-        } finally {
-            setTimeout(() => {
-                dom.refreshDevicesBtn.classList.remove('spinning');
-            }, 450);
-        }
-    };
+    dom.powerBtn.addEventListener('click', togglePower);
+    dom.refreshDevicesBtn.addEventListener('click', refreshDevices);
 
-    // Change Routing selection dropdowns
-    dom.inputSelect.onchange = (e) => sendConfigChange('input_device', e.target.value);
-    dom.outputSelect.onchange = (e) => {
+    dom.inputSelect.addEventListener('change', (e) => sendConfigChange('input_device', e.target.value));
+    dom.outputSelect.addEventListener('change', (e) => {
         sendConfigChange('output_device', e.target.value);
         updateRoutingWarning();
-    };
-    
-    dom.monitorCheckbox.onchange = (e) => {
-        const val = e.target.checked;
-        dom.monitorSelect.disabled = !val;
-        sendConfigChange('monitor_enabled', val);
-    };
-    dom.monitorSelect.onchange = (e) => sendConfigChange('monitor_device', e.target.value);
-    
-    // Easy mode preset buttons
-    dom.presetOff.onclick = () => applyPreset('off');
-    dom.presetVoice.onclick = () => applyPreset('voice');
-    dom.presetGaming.onclick = () => applyPreset('gaming');
-    dom.presetBroadcaster.onclick = () => applyPreset('broadcaster');
-    
-    // Easy mode sliders
-    dom.easyNSSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.easyNSVal.textContent = `${val}%`;
-        
-        dom.nsStrengthSlider.value = val;
-        dom.nsStrengthVal.textContent = `${val}%`;
-        
-        if (settings.ns_mode === 'off') {
-            updateNSModeButtons('eco');
-            sendConfigChange('ns_mode', 'eco');
-        }
-        sendConfigChange('ns_eco_strength', val / 100);
-    };
-    
-    dom.easyToneSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        applyVoiceToneSlider(val);
-    };
-    
-    // Advanced Gains
-    dom.inputGainSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.inputGainVal.textContent = `${val.toFixed(2)}x`;
-        sendConfigChange('input_gain', val);
-    };
-    dom.outputGainSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.outputGainVal.textContent = `${val.toFixed(2)}x`;
-        sendConfigChange('output_gain', val);
-    };
-    
-    // Advanced NS mode selection
-    dom.nsModeOff.onclick = () => { updateNSModeButtons('off'); sendConfigChange('ns_mode', 'off'); };
-    dom.nsModeEco.onclick = () => { updateNSModeButtons('eco'); sendConfigChange('ns_mode', 'eco'); };
-    dom.nsModeHigh.onclick = () => { updateNSModeButtons('high'); sendConfigChange('ns_mode', 'high'); };
-    
-    dom.nsStrengthSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.nsStrengthVal.textContent = `${val}%`;
-        dom.easyNSSlider.value = val;
-        dom.easyNSVal.textContent = `${val}%`;
-        sendConfigChange('ns_eco_strength', val / 100);
-    };
-    
-    // Advanced Noise Gate
-    dom.gateCheckbox.onchange = (e) => {
-        const val = e.target.checked;
-        sendConfigChange('gate_enabled', val);
-        settings.gate_enabled = val;
-        updateGateMarkerPosition(settings.gate_threshold_db);
-    };
-    dom.gateThreshSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.gateThreshVal.textContent = `${val} dB`;
-        sendConfigChange('gate_threshold_db', val);
-        settings.gate_threshold_db = val;
-        updateGateMarkerPosition(val);
-    };
-    dom.gateReleaseSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.gateReleaseVal.textContent = `${val} ms`;
-        sendConfigChange('gate_release_ms', val);
-    };
-    
-    // Advanced EQ
-    dom.eqCheckbox.onchange = (e) => sendConfigChange('eq_enabled', e.target.checked);
-    dom.eqLowSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.eqLowVal.textContent = `${val > 0 ? '+' : ''}${val.toFixed(1)} dB`;
-        sendConfigChange('eq_low_gain_db', val);
-        syncEQToToneSlider(Object.assign({}, settings, { eq_low_gain_db: val }));
-    };
-    dom.eqMidSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.eqMidVal.textContent = `${val > 0 ? '+' : ''}${val.toFixed(1)} dB`;
-        sendConfigChange('eq_mid_gain_db', val);
-        syncEQToToneSlider(Object.assign({}, settings, { eq_mid_gain_db: val }));
-    };
-    dom.eqHighSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.eqHighVal.textContent = `${val > 0 ? '+' : ''}${val.toFixed(1)} dB`;
-        sendConfigChange('eq_high_gain_db', val);
-        syncEQToToneSlider(Object.assign({}, settings, { eq_high_gain_db: val }));
-    };
-    
-    // Advanced Compressor
-    dom.compCheckbox.onchange = (e) => sendConfigChange('compressor_enabled', e.target.checked);
-    dom.compThreshSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.compThreshVal.textContent = `${val} dB`;
-        sendConfigChange('compressor_threshold_db', val);
-    };
-    dom.compRatioSlider.oninput = (e) => {
-        const val = parseFloat(e.target.value);
-        dom.compRatioVal.textContent = `${val.toFixed(1)}:1`;
-        sendConfigChange('compressor_ratio', val);
-    };
-    dom.compAttackSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.compAttackVal.textContent = `${val} ms`;
-        sendConfigChange('compressor_attack_ms', val);
-    };
-    dom.compReleaseSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.compReleaseVal.textContent = `${val} ms`;
-        sendConfigChange('compressor_release_ms', val);
-    };
-    
-    // Advanced De-Esser
-    dom.deesserCheckbox.onchange = (e) => sendConfigChange('deesser_enabled', e.target.checked);
-    dom.deesserThreshSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.deesserThreshVal.textContent = `${val} dB`;
-        sendConfigChange('deesser_threshold_db', val);
-    };
-    dom.deesserAmountSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.deesserAmountVal.textContent = `${val}%`;
-        sendConfigChange('deesser_amount', val / 100);
-    };
-
-    // Advanced Vocal Exciter
-    dom.exciterCheckbox.onchange = (e) => sendConfigChange('exciter_enabled', e.target.checked);
-    dom.exciterFreqSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.exciterFreqVal.textContent = `${val} Hz`;
-        sendConfigChange('exciter_frequency', val);
-    };
-    dom.exciterAmountSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.exciterAmountVal.textContent = `${val}%`;
-        sendConfigChange('exciter_amount', val / 100);
-    };
-    dom.exciterMixSlider.oninput = (e) => {
-        const val = parseInt(e.target.value);
-        dom.exciterMixVal.textContent = `${val}%`;
-        sendConfigChange('exciter_mix', val / 100);
-    };
-    
-    // Advanced VST3 Plugin
-    dom.vstCheckbox.onchange = (e) => sendConfigChange('vst_enabled', e.target.checked);
-    dom.vstLoadBtn.onclick = () => {
-        const path = dom.vstPathInput.value.trim();
-        sendConfigChange('vst_path', path);
-        
-        dom.vstStatusMsg.style.display = 'block';
-        dom.vstStatusMsg.textContent = "Yükleniyor (Loading VST)...";
-        dom.vstStatusMsg.className = "info-bubble";
-        
-        // Wait a moment and fetch updated settings
-        setTimeout(async () => {
-            await fetchSettings();
-            if (settings.vst_enabled && settings.vst_path && !isVstFailed) {
-                dom.vstStatusMsg.textContent = "VST3 başarıyla yüklendi! (Successfully loaded VST3)";
-                dom.vstStatusMsg.className = "info-bubble success-glow";
-            } else {
-                dom.vstStatusMsg.textContent = "Yükleme başarısız. Dosya yolunu kontrol edin. (Failed to load VST3)";
-                dom.vstStatusMsg.className = "info-bubble warning-glow";
-            }
-        }, 1500);
-    };
-    
-    dom.vstEditorBtn.onclick = async () => {
-        try {
-            await fetch(`${API_BASE}/api/vst/show-editor`, {
-                method: 'POST',
-                headers: { 'X-API-Key': HUSHCORE_API_KEY }
-            });
-        } catch (e) {
-            console.error("Failed to show editor", e);
-        }
-    };
-    
-    // Latency Buffer size tuning
-    dom.bufferSizeSelect.onchange = (e) => {
+    });
+    dom.monitorSelect.addEventListener('change', (e) => sendConfigChange('monitor_device', e.target.value));
+    dom.bufferSizeSelect.addEventListener('change', (e) => {
         sendConfigChange('buffer_size', e.target.value);
-        alert("Gecikme tampon boyutu değişikliği ses motoru yeniden başlatıldığında (STOP/START) aktif olacaktır.");
-    };
-    
-    // Visualizer Mode
-    dom.vizTabSpec.onclick = () => setVizMode('spec');
-    dom.vizTabWave.onclick = () => setVizMode('wave');
-    dom.vizTabCascade.onclick = () => setVizMode('cascade');
-    
-    function setVizMode(mode) {
-        dom.vizTabSpec.classList.remove('active');
-        dom.vizTabWave.classList.remove('active');
-        dom.vizTabCascade.classList.remove('active');
-        
-        if (mode === 'spec') dom.vizTabSpec.classList.add('active');
-        if (mode === 'wave') dom.vizTabWave.classList.add('active');
-        if (mode === 'cascade') dom.vizTabCascade.classList.add('active');
-        
-        currentVizMode = mode;
+        showToast('Buffer size takes effect after the engine restarts (STOP, then START).', 'info', 5000);
+    });
+
+    for (const c of CHECK_CONTROLS) {
+        c.el.addEventListener('change', () => {
+            sendConfigChange(c.key, c.el.checked);
+            if (c.onChange) c.onChange();
+        });
     }
+
+    document.querySelectorAll('[data-preset]').forEach((btn) => {
+        btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+    });
+    dom.savePresetForm.addEventListener('submit', saveCurrentAsPreset);
+    dom.easyToneSlider.addEventListener('input', (e) => applyToneStep(Number(e.target.value)));
+
+    for (const c of RANGE_CONTROLS) bindRange(c);
+
+    dom.nsModeOff.addEventListener('click', () => setNSMode('off'));
+    dom.nsModeEco.addEventListener('click', () => setNSMode('eco'));
+    dom.nsModeHigh.addEventListener('click', () => setNSMode('high'));
+
+    dom.vstLoadBtn.addEventListener('click', loadVst);
+    dom.vstPathInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') loadVst();
+    });
+    dom.vstEditorBtn.addEventListener('click', openVstEditor);
+
+    dom.vizTabSpec.addEventListener('click', () => setVizMode('spec'));
+    dom.vizTabPulse.addEventListener('click', () => setVizMode('pulse'));
+    dom.vizTabCascade.addEventListener('click', () => setVizMode('cascade'));
 }
 
-// --- High-Performance Animation/Drawing Loop ---
-function startVisualizationLoop() {
-    function draw() {
-        requestAnimationFrame(draw);
-        
-        // Render volume level meters using GPU scaleX (Fast, no reflow)
-        const inPercent = dbToPercent(inputLevelSmoothed);
-        const outPercent = dbToPercent(outputLevelSmoothed);
-        
-        dom.inputMeterFill.style.transform = `scaleX(${inPercent / 100})`;
-        dom.outputMeterFill.style.transform = `scaleX(${outPercent / 100})`;
-        
-        // Clear canvas
-        const w = dom.canvas.width / (window.devicePixelRatio || 1);
-        const h = dom.canvas.height / (window.devicePixelRatio || 1);
-        ctx.fillStyle = '#08080c';
-        ctx.fillRect(0, 0, w, h);
-        
-        // Smooth FFT bins
-        for (let i = 0; i < 64; i++) {
-            const rawVal = rawFFTData[i] || 0;
-            smoothedFFT[i] = smoothedFFT[i] * 0.8 + rawVal * 0.2;
-        }
-        
-        if (currentVizMode === 'spec') {
-            drawSpectrum(w, h);
-        } else if (currentVizMode === 'wave') {
-            drawWaveform(w, h);
-        } else if (currentVizMode === 'cascade') {
-            // Push current smoothed values to history buffer
-            cascadeHistory.push([...smoothedFFT]);
-            if (cascadeHistory.length > maxCascadeFrames) {
-                cascadeHistory.shift();
-            }
-            drawCascade(w, h);
-        }
-    }
-    requestAnimationFrame(draw);
+// --- Start ----------------------------------------------------------------
+function init() {
+    setupEventListeners();
+    connectWebSocket();
+    startVisualizer();
+    loadAll();
 }
 
-function drawSpectrum(w, h) {
-    const barCount = 36;
-    const padding = 2.5;
-    const barWidth = (w - (barCount - 1) * padding) / barCount;
-    
-    for (let i = 0; i < barCount; i++) {
-        const binIdx = Math.floor((i / barCount) * 40);
-        const val = smoothedFFT[binIdx] || 0;
-        
-        const barHeight = Math.max(2, val * (h - 15));
-        const x = i * (barWidth + padding);
-        const y = h - barHeight;
-        
-        const grad = ctx.createLinearGradient(0, h, 0, y);
-        grad.addColorStop(0, '#00f2fe');
-        grad.addColorStop(0.6, '#9d4edd');
-        grad.addColorStop(1, '#ff007f');
-        
-        ctx.fillStyle = grad;
-        
-        ctx.beginPath();
-        ctx.roundRect(x, y, barWidth, barHeight, [2, 2, 0, 0]);
-        ctx.fill();
-        
-        // High frequency glow lines (no shadowBlur filter for maximum performance)
-        if (val > 0.45) {
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(x, y, barWidth, 1.5);
-        }
-    }
-}
-
-function drawWaveform(w, h) {
-    const centerY = h / 2;
-    const points = 80;
-    
-    let energySum = smoothedFFT.reduce((a, b) => a + b, 0) / 64;
-    if (!isGateOpen) energySum = 0;
-    
-    ctx.beginPath();
-    for (let i = 0; i < points; i++) {
-        const x = (i / (points - 1)) * w;
-        
-        let displacement = 0;
-        if (energySum > 0.04) {
-            const time = Date.now() * 0.015;
-            displacement = 
-                Math.sin(i * 0.2 + time) * 10 * (smoothedFFT[4] || 0.1) +
-                Math.sin(i * 0.4 - time * 1.2) * 6 * (smoothedFFT[10] || 0.1);
-            
-            const taper = Math.sin((i / (points - 1)) * Math.PI);
-            displacement *= taper * (energySum * 2.0);
-        }
-        
-        const y = centerY + displacement;
-        if (i === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
-    }
-    
-    // Draw a high performance dual-stroke glow effect
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(0, 242, 254, 0.2)';
-    ctx.stroke();
-    
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#00f2fe';
-    ctx.stroke();
-}
-
-function drawCascade(w, h) {
-    if (cascadeHistory.length === 0) return;
-    
-    const points = 36;
-    const stepX = w / (points - 1);
-    
-    // Projection offsets for 3D isometric waterfall
-    const offsetX = 0.8;
-    const offsetY = 2.2;
-    
-    for (let f = 0; f < cascadeHistory.length; f++) {
-        const fftFrame = cascadeHistory[f];
-        const pct = f / (cascadeHistory.length - 1); // 0 = oldest, 1 = newest
-        
-        const startXOffset = (cascadeHistory.length - 1 - f) * offsetX;
-        const startYOffset = (cascadeHistory.length - 1 - f) * offsetY;
-        
-        ctx.beginPath();
-        for (let i = 0; i < points; i++) {
-            const x = startXOffset + i * stepX * 0.95;
-            const val = fftFrame[i] || 0;
-            const amplitude = val * (h * 0.35);
-            const y = (h - 10) - startYOffset - amplitude;
-            
-            if (i === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-            }
-        }
-        
-        ctx.lineWidth = 1 + pct * 0.8;
-        const alpha = 0.08 + pct * 0.5;
-        const hue = 180 + (1 - pct) * 120; // Neon cyan to neon purple
-        ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha})`;
-        ctx.stroke();
-    }
-}
-
-// Start application
-window.onload = init;
+init();

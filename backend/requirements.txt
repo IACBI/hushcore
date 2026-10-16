@@ -1,12 +1,9 @@
-fastapi
-uvicorn
-sounddevice
-numpy
-scipy
-websockets
-pedalboard
-pystray
-# Optional for DeepFilterNet support:
-# torch
-# torchaudio
-# deepfilternet
+fastapi>=0.110.0
+uvicorn>=0.27.0
+websockets>=12.0
+sounddevice>=0.4.6
+numpy>=1.24
+scipy>=1.10
+pedalboard>=0.9.0
+pystray>=0.19.4
+Pillow>=10.0.0

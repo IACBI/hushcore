@@ -1,13 +1,14 @@
 {
-  "name": "voiceimp-frontend",
+  "name": "hushcore-frontend",
+  "version": "1.1.0",
+  "description": "Dashboard for the HushCore local microphone processor, built with Vite into the FastAPI backend's static directory.",
   "private": true,
-  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port 3000 --host 127.0.0.1",
     "build": "vite build"
   },
   "devDependencies": {
-    "vite": "^5.0.0"
+    "vite": "^8.3.4"
   }
 }
