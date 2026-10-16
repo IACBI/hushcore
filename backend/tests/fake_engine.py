@@ -10,9 +10,14 @@ Magic input device names select failure modes:
   __deaf__     start succeeds, then the process ignores every command and EOF
   __exclusive_ok__  an exclusive start succeeds and reports mode "exclusive"
   __notice__   start succeeds and a non-fatal runtime error follows started
+  __reconnect__  start succeeds, then the device is lost: reconnecting follows and no status
+                 events are sent until stop
+  __reconnect_recover__  as __reconnect__, but started follows 0.3 s later and status resumes
 
 An exclusive start on any other device emits a non-fatal fallback error and then started with
 mode "shared", like the real engine does when the device refuses exclusive mode.
+
+The devices event reports HushCore's virtual microphone as installed when HUSHCORE_FAKE_VIRTUAL=1.
 
 Every command received is appended as one JSON line to $HUSHCORE_FAKE_ENGINE_LOG when that
 variable is set, so tests can check what the backend sent.
@@ -30,6 +35,18 @@ DEVICES = {
     "inputs": [{"name": "Fake Mic", "default": True, "min_period_ms": 5.0, "sample_rate": 48000}],
     "outputs": [{"name": "Fake Speakers", "default": True, "min_period_ms": 5.0, "sample_rate": 48000}],
 }
+
+
+def virtual_device():
+    if os.environ.get("HUSHCORE_FAKE_VIRTUAL") == "1":
+        return {
+            "installed": True,
+            "provider": "windows-driver",
+            "sink": "HushCore Sink (fake)",
+            "microphone": "HushCore Microphone (fake)",
+            "detail": "fake virtual device",
+        }
+    return {"installed": False, "provider": "none", "sink": None, "microphone": None, "detail": "not installed"}
 
 _out_lock = threading.Lock()
 _state = {"running": False, "silent": False, "xrun": False, "xruns": 0}
@@ -88,11 +105,18 @@ def start(command):
         else:
             emit("error", message="exclusive mode unavailable (fake device); using shared mode", fatal=False)
     _state["running"] = True
-    _state["silent"] = device == "__silent__"
+    _state["silent"] = device in ("__silent__", "__reconnect__", "__reconnect_recover__")
     _state["xrun"] = device == "__xrun__"
     emit("started", sample_rate=48000, mode=mode, input_period_ms=5.0, output_period_ms=5.0, latency_ms=10.0)
     if device == "__notice__":
         emit("error", message="monitor output device lost", fatal=False)
+    if device in ("__reconnect__", "__reconnect_recover__"):
+        emit("reconnecting", reason="audio device lost (fake)", attempt=1, retry_in_ms=250)
+    if device == "__reconnect_recover__":
+        def recover():
+            _state["silent"] = False
+            emit("started", sample_rate=48000, mode=mode, input_period_ms=5.0, output_period_ms=5.0, latency_ms=10.0)
+        threading.Timer(0.3, recover).start()
     if device == "__crash__":
         threading.Timer(0.3, lambda: os._exit(3)).start()
     if device == "__deaf__":
@@ -113,7 +137,7 @@ def main():
         log_command(command)
         cmd = command.get("cmd")
         if cmd == "devices":
-            emit("devices", **DEVICES)
+            emit("devices", **DEVICES, virtual_device=virtual_device())
         elif cmd == "start" and not _state["running"]:
             start(command)
         elif cmd == "stop":

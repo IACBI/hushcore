@@ -125,6 +125,9 @@ class NativeEngineClient:
         self._status = None
         self._status_at = 0.0
         self._xruns = 0
+        self._reconnecting = False
+        self._reconnect_reason = None
+        self._virtual_device = None
 
         self.running = _RunningView(self)
         atexit.register(self.shutdown)
@@ -207,6 +210,8 @@ class NativeEngineClient:
             started = dict(self._started or {})
             xruns = self._xruns
             notice = self._engine_notice
+            reconnecting = self._reconnecting and running
+            reconnect_reason = self._reconnect_reason if reconnecting else None
 
         sample_rate = status.get("sample_rate") or started.get("sample_rate") or DEFAULT_SAMPLE_RATE
         fft = status.get("fft_data") or [0.0] * FFT_BINS
@@ -227,7 +232,23 @@ class NativeEngineClient:
             "xruns": int(xruns),
             "engine_mode": (started.get("mode") if running else None) or "shared",
             "engine_notice": notice,
+            "reconnecting": reconnecting,
+            "reconnect_reason": reconnect_reason,
         }
+
+    def virtual_device(self):
+        """Latest virtual_device object from the engine's devices event, or None if none was reported."""
+        with self._cond:
+            cached = self._virtual_device
+            alive = self._proc is not None and not self._eof
+        if cached is None and alive:
+            try:
+                self._engine_devices()
+            except RuntimeError:
+                return None
+            with self._cond:
+                cached = self._virtual_device
+        return cached
 
     def show_vst_editor(self):
         raise RuntimeError("No VST3 plugin loaded")
@@ -239,6 +260,9 @@ class NativeEngineClient:
     # ----- process lifecycle -------------------------------------------------------------
 
     def _is_running_locked(self):
+        # While the engine retries a lost device it sends no status events, but it is still running.
+        if self._reconnecting:
+            return self._running
         return self._running and (time.monotonic() - self._status_at) <= STATUS_STALE_S
 
     def _start_locked(self, restart_stale):
@@ -319,6 +343,8 @@ class NativeEngineClient:
             self._proc = proc
             self._eof = False
             self._running = False
+            self._reconnecting = False
+            self._reconnect_reason = None
             self._start_result = None
             self._devices_reply = None
             self._last_error = None
@@ -336,6 +362,8 @@ class NativeEngineClient:
         with self._cond:
             proc, self._proc = self._proc, None
             self._running = False
+            self._reconnecting = False
+            self._reconnect_reason = None
             self._cond.notify_all()
         if proc is not None:
             self._quit_process(proc)
@@ -431,6 +459,7 @@ class NativeEngineClient:
             if current:
                 self._eof = True
                 self._running = False
+                self._reconnecting = False
                 self._cond.notify_all()
         if current:
             try:
@@ -478,16 +507,30 @@ class NativeEngineClient:
                 self._started = event
                 self._status_at = time.monotonic()
                 self._running = True
+                self._reconnecting = False
+                self._reconnect_reason = None
                 self._start_result = (True, None)
                 logger.info(
                     "Native engine started: %s Hz, mode %s, latency %s ms",
                     event.get("sample_rate"), event.get("mode"), event.get("latency_ms"),
                 )
+            elif kind == "reconnecting":
+                # Not a stop: the engine keeps the session alive and retries the last start itself.
+                reason = str(event.get("reason") or "audio device lost")
+                if not self._reconnecting or self._reconnect_reason != reason:
+                    logger.warning("Native engine reconnecting (attempt %s): %s", event.get("attempt"), reason)
+                self._reconnecting = True
+                self._reconnect_reason = reason
             elif kind == "stopped":
                 self._running = False
+                self._reconnecting = False
+                self._reconnect_reason = None
                 self._stop_count += 1
             elif kind == "devices":
                 self._devices_reply = event
+                virtual = event.get("virtual_device")
+                if isinstance(virtual, dict):
+                    self._virtual_device = virtual
             elif kind == "error":
                 message = str(event.get("message", "unknown error"))
                 fatal = bool(event.get("fatal", False))

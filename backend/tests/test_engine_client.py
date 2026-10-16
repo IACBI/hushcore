@@ -20,7 +20,7 @@ ENGINE_STATUS_KEYS = {
     "input_rms", "output_rms", "gate_state", "fft_data", "is_running",
     "df_available", "vst_loaded", "vst_failed", "sample_rate",
     "latency_ms", "cpu_load", "clipping", "engine", "xruns",
-    "engine_mode", "engine_notice",
+    "engine_mode", "engine_notice", "reconnecting", "reconnect_reason",
 }
 
 
@@ -318,6 +318,66 @@ def test_shutdown_terminates_an_engine_that_ignores_quit(make_client):
     assert proc.poll() is not None
     assert proc.returncode != 0
     assert client._proc is None
+
+
+def test_reconnecting_keeps_engine_running_past_status_staleness(make_client, command_log):
+    client = make_client({"input_device": "__reconnect__", "output_device": "", "monitor_device": "", "monitor_enabled": False})
+    assert client.start() is True
+    assert wait_for(lambda: client.get_status()["reconnecting"])
+
+    # No status events arrive while the engine retries, which is longer than STATUS_STALE_S.
+    time.sleep(engine_client.STATUS_STALE_S + 0.3)
+    status = client.get_status()
+    assert status["is_running"] is True
+    assert client.is_running() is True
+    assert status["reconnecting"] is True
+    assert status["reconnect_reason"] == "audio device lost (fake)"
+
+    # A start while reconnecting is a no-op: the engine is still running and retrying itself.
+    assert client.start() is True
+    assert [c["cmd"] for c in read_log(command_log)].count("start") == 1
+
+    client.stop()
+    assert client.is_running() is False
+    status = client.get_status()
+    assert status["reconnecting"] is False
+    assert status["reconnect_reason"] is None
+
+
+def test_started_after_reconnecting_clears_the_state(make_client):
+    client = make_client({"input_device": "__reconnect_recover__", "output_device": "", "monitor_device": "", "monitor_enabled": False})
+    assert client.start() is True
+    assert wait_for(lambda: client.get_status()["reconnecting"])
+    assert wait_for(lambda: not client.get_status()["reconnecting"] and client.get_status()["input_rms"] == -30.0)
+    status = client.get_status()
+    assert status["is_running"] is True
+    assert status["reconnect_reason"] is None
+
+
+def test_virtual_device_is_reported_by_the_engine_devices_event(make_client, monkeypatch):
+    monkeypatch.setenv("HUSHCORE_FAKE_VIRTUAL", "1")
+    client = make_client()
+    assert client.virtual_device() is None
+    assert client._proc is None  # asking for the virtual device does not launch the engine
+
+    assert client.start() is True
+    device = client.virtual_device()
+    assert device["installed"] is True
+    assert device["provider"] == "windows-driver"
+    assert device["sink"] == "HushCore Sink (fake)"
+    assert device["microphone"] == "HushCore Microphone (fake)"
+
+
+def test_virtual_device_not_installed_is_reported_as_such(make_client):
+    client = make_client()
+    assert client.start() is True
+    assert client.virtual_device() == {
+        "installed": False,
+        "provider": "none",
+        "sink": None,
+        "microphone": None,
+        "detail": "not installed",
+    }
 
 
 def test_get_devices_uses_sounddevice_listing_without_launching_engine(make_client, monkeypatch):

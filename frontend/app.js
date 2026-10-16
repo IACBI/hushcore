@@ -27,8 +27,9 @@ const TONE_STEPS = [
     { label: 'Natural', low: 0.0, mid: 0.0, high: 0.0 },
     { label: 'Bright', low: -2.0, mid: 1.0, high: 4.5 },
 ];
-// Windows reports device names in the OS language, so the Turkish keywords are needed.
-const VIRTUAL_OUTPUT_HINTS = ['cable', 'virtual', 'vb-audio', 'voicemeeter'];
+// The engine writes to this endpoint; applications read HushCore Microphone instead.
+const HUSHCORE_SINK_NAME = 'hushcore sink';
+const VIRTUAL_MIC_HINT = 'In Discord, OBS or Zoom choose “HushCore Microphone” as the microphone.';
 
 class ApiError extends Error {
     constructor(message, status) {
@@ -49,6 +50,8 @@ let reconnectDelay = WS_RETRY_MIN_MS;
 let settings = {};
 let presets = { builtin: {}, user: {} };
 let engineRunning = null;
+let engineReconnecting = false;
+let virtualDevice = null;
 let aiAvailable = null;
 let gateOpen = null;
 let powerBusy = false;
@@ -57,6 +60,7 @@ let engineState = null;
 let shownEngine = null;
 let shownXruns = null;
 let shownNotice = null;
+let shownReconnect = null;
 let isVstFailed = false;
 let armedDelete = null;
 let clipTimer = 0;
@@ -86,6 +90,9 @@ const dom = {
     viewModeAdv: $('view-mode-adv'),
     powerBtn: $('power-btn'),
     engineStatus: $('engine-status'),
+    virtualDeviceStatus: $('virtual-device-status'),
+    virtualDeviceLabel: $('virtual-device-label'),
+    virtualDeviceCopy: $('virtual-device-copy'),
     aiStatus: $('ai-status'),
     connIndicator: $('connection-indicator'),
     toastRegion: $('toast-region'),
@@ -498,6 +505,12 @@ async function fetchDevices() {
     populateDevices(await api('/api/devices'));
 }
 
+async function fetchVirtualDevice() {
+    virtualDevice = await api('/api/virtual-device');
+    renderVirtualDevice();
+    updateRoutingWarning();
+}
+
 async function fetchPresets() {
     const data = await api('/api/presets');
     presets = { builtin: data.builtin || {}, user: data.user || {} };
@@ -506,7 +519,13 @@ async function fetchPresets() {
 
 async function loadAll() {
     const failures = [];
-    const steps = [['settings', fetchSettings], ['devices', fetchDevices], ['presets', fetchPresets], ['engine', fetchEngine]];
+    const steps = [
+        ['settings', fetchSettings],
+        ['devices', fetchDevices],
+        ['virtual microphone', fetchVirtualDevice],
+        ['presets', fetchPresets],
+        ['engine', fetchEngine],
+    ];
     for (const [name, load] of steps) {
         try {
             await load();
@@ -532,7 +551,7 @@ function populateDevices(list) {
     fillSelect(dom.inputSelect, list.inputs, 'System default microphone');
     if (settings.input_device) dom.inputSelect.value = settings.input_device;
 
-    fillSelect(dom.outputSelect, list.outputs, 'Auto (virtual cable if installed)');
+    fillSelect(dom.outputSelect, list.outputs, 'Auto (HushCore Sink if installed)');
     if (settings.output_device) dom.outputSelect.value = settings.output_device;
 
     fillSelect(dom.monitorSelect, list.outputs, 'Select headphones...');
@@ -541,9 +560,42 @@ function populateDevices(list) {
     updateRoutingWarning();
 }
 
-function isVirtualOutput(name) {
-    const lower = name.toLowerCase();
-    return VIRTUAL_OUTPUT_HINTS.some((hint) => lower.includes(hint));
+function isHushCoreSink(name) {
+    return String(name).toLowerCase().includes(HUSHCORE_SINK_NAME);
+}
+
+function renderVirtualDevice() {
+    const status = virtualDevice;
+    const installed = Boolean(status && status.installed);
+    const command = status && !installed ? status.install_command : null;
+    dom.virtualDeviceStatus.classList.toggle('installed', installed);
+    dom.virtualDeviceStatus.classList.toggle('missing', Boolean(status) && !installed);
+
+    dom.virtualDeviceLabel.replaceChildren();
+    if (!status) {
+        dom.virtualDeviceLabel.textContent = 'HushCore Microphone: checking...';
+    } else if (installed) {
+        dom.virtualDeviceLabel.textContent = 'HushCore Microphone: installed';
+    } else {
+        dom.virtualDeviceLabel.append('HushCore Microphone: not installed');
+        if (command) {
+            const code = document.createElement('code');
+            code.textContent = command;
+            dom.virtualDeviceLabel.append(' — run ', code);
+        }
+    }
+    dom.virtualDeviceCopy.hidden = !command;
+}
+
+async function copyInstallCommand() {
+    const command = virtualDevice && virtualDevice.install_command;
+    if (!command) return;
+    try {
+        await navigator.clipboard.writeText(command);
+        showToast('Install command copied.', 'success', 2500);
+    } catch {
+        showToast('Could not copy. Select the command and copy it instead.', 'error');
+    }
 }
 
 function setRoutingBanner(variant, title, body) {
@@ -560,23 +612,31 @@ function setRoutingBanner(variant, title, body) {
 
 function updateRoutingWarning() {
     const selected = dom.outputSelect.value;
-    if (!selected) {
-        setRoutingBanner('warning', 'Automatic output.', 'HushCore uses a virtual cable if one is installed, otherwise your default speakers. Pick CABLE Input to be sure.');
-        return;
-    }
-    if (isVirtualOutput(selected)) {
-        setRoutingBanner(
-            'success',
-            'Virtual cable active.',
-            'Audio is sent to the virtual cable. In Discord or OBS, choose "VB-Cable Output" as the microphone.'
-        );
-    } else {
+    if (selected && !isHushCoreSink(selected)) {
         setRoutingBanner(
             'warning',
-            'Not a virtual cable.',
-            'Other apps will not receive this audio, and a speaker output lets you hear yourself. To use HushCore in Discord, Zoom or OBS, route the output to a virtual cable such as VB-Cable.'
+            'Not the HushCore Sink.',
+            'You hear yourself through this output, and other apps receive nothing. Choose "HushCore Sink" to use the virtual microphone.'
         );
+        return;
     }
+    if (!virtualDevice) {
+        setRoutingBanner('warning', 'Checking the virtual microphone...', '');
+        return;
+    }
+    const sinkActive = selected ? isHushCoreSink(selected) : virtualDevice.installed;
+    if (sinkActive) {
+        setRoutingBanner('success', 'Virtual microphone active.', VIRTUAL_MIC_HINT);
+        return;
+    }
+    const command = virtualDevice.install_command;
+    setRoutingBanner(
+        'warning',
+        'HushCore Sink is not installed.',
+        command
+            ? `Install the virtual microphone with: ${command}`
+            : 'Install the HushCore virtual microphone for this platform, then refresh the devices.'
+    );
 }
 
 // --- Settings writes ------------------------------------------------------
@@ -715,7 +775,7 @@ function scheduleReconnect() {
 
 // --- Live metrics ---------------------------------------------------------
 function updateUIWithMetrics(m) {
-    setEngineState(Boolean(m.is_running));
+    setEngineState(Boolean(m.is_running), Boolean(m.reconnecting));
     setAiState(Boolean(m.df_available));
     setGateState(Boolean(m.gate_state));
 
@@ -730,11 +790,12 @@ function updateUIWithMetrics(m) {
     if (m.clipping === true) flashClip();
 }
 
-function setEngineState(running) {
-    if (running === engineRunning) return;
+function setEngineState(running, reconnecting = false) {
+    if (running === engineRunning && reconnecting === engineReconnecting) return;
     engineRunning = running;
-    dom.engineStatus.textContent = running ? 'RUNNING' : 'STOPPED';
-    dom.engineStatus.className = `status-value ${running ? 'status-running' : 'status-stopped'}`;
+    engineReconnecting = reconnecting;
+    dom.engineStatus.textContent = reconnecting ? 'RECONNECTING…' : running ? 'RUNNING' : 'STOPPED';
+    dom.engineStatus.className = `status-value ${reconnecting ? 'status-reconnecting' : running ? 'status-running' : 'status-stopped'}`;
     dom.powerBtn.textContent = running ? 'STOP ENGINE' : 'START ENGINE';
     dom.powerBtn.classList.toggle('power-running', running);
 }
@@ -787,6 +848,12 @@ function updateStatusStrip(m) {
     if (notice !== shownNotice) {
         shownNotice = notice;
         if (notice) showToast(`${notice.charAt(0).toUpperCase()}${notice.slice(1)}`, 'info', 6000);
+    }
+
+    const reconnect = m.reconnecting === true ? (typeof m.reconnect_reason === 'string' && m.reconnect_reason) || 'audio device lost' : null;
+    if (reconnect !== shownReconnect) {
+        shownReconnect = reconnect;
+        if (reconnect) showToast(`Audio interrupted, reconnecting: ${reconnect}`, 'error', 6000);
     }
 
     const xruns = Number.isFinite(m.xruns) ? Math.max(0, Math.trunc(m.xruns)) : 0;
@@ -1025,7 +1092,7 @@ function renderEngineMode() {
         const unavailable = mode === 'native' && !nativeAvailable;
         setPressed(btn, mode === engineState.mode);
         btn.disabled = engineBusy || unavailable;
-        btn.title = unavailable ? 'hushcore-engine.exe was not found' : '';
+        btn.title = unavailable ? 'The native engine binary was not found' : '';
     }
     let note = '';
     if (!nativeAvailable) {
@@ -1082,6 +1149,7 @@ async function refreshDevices() {
     dom.refreshDevicesBtn.classList.add('spinning');
     try {
         await fetchDevices();
+        await fetchVirtualDevice();
     } catch (err) {
         console.error('Device refresh failed:', err);
         showToast('Could not refresh audio devices.', 'error');
@@ -1148,6 +1216,7 @@ function setupEventListeners() {
     dom.powerBtn.addEventListener('click', togglePower);
     engineModeButtons().forEach((btn) => btn.addEventListener('click', () => setEngineMode(btn.dataset.engine)));
     dom.refreshDevicesBtn.addEventListener('click', refreshDevices);
+    dom.virtualDeviceCopy.addEventListener('click', copyInstallCommand);
 
     dom.inputSelect.addEventListener('change', (e) => sendConfigChange('input_device', e.target.value));
     dom.outputSelect.addEventListener('change', (e) => {
