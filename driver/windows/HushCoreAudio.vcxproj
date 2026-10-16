@@ -68,6 +68,9 @@
     <SignMode>TestSign</SignMode>
     <EnableInf2cat>true</EnableInf2cat>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <!-- The build-time package verifier (WindowsDriver.common.targets, DPVerifierTask) cannot load
+         InfVerif.dll on hosted runners; CI runs infverif.exe on the staged package instead. -->
+    <SkipPackageVerification>true</SkipPackageVerification>
   </PropertyGroup>
   <!-- inf2cat OS names: Windows 10 on ARM64 starts at 1709 (RS3). -->
   <PropertyGroup Condition="'$(Platform)'=='x64'">
@@ -110,6 +113,9 @@
 
   <ItemGroup>
     <Inf Include="HushCoreAudio.inf" />
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
