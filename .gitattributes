@@ -1,2 +1,9 @@
 * text=auto
 *.bat text eol=crlf
+# Executed on macOS/Linux or inside the Linux container: must stay LF even in a Windows checkout.
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.conf text eol=lf
+*.pa text eol=lf
+tools/linux-docker/** text eol=lf

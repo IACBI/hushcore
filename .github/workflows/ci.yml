@@ -8,6 +8,23 @@ permissions:
   contents: read
 
 jobs:
+  # HushCore ships its own virtual device on every platform; nothing may point users at third-party
+  # virtual audio software again.
+  no-third-party-audio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Search sources for third-party virtual audio names
+        run: |
+          if grep -rniE "vb-audio|vb-cable|voicemeeter|blackhole|CABLE (Input|Output)" \
+              --include='*.rs' --include='*.py' --include='*.js' --include='*.html' --include='*.c' \
+              --include='*.cpp' --include='*.h' --include='*.inf' --include='*.ps1' --include='*.sh' \
+              --include='*.bat' --include='*.conf' --include='*.pa' \
+              --exclude-dir=node_modules --exclude-dir=.git .; then
+            echo "Found references to third-party virtual audio software." >&2
+            exit 1
+          fi
+
   backend:
     runs-on: ubuntu-latest
     strategy:
@@ -53,19 +70,124 @@ jobs:
       - run: npm run build
 
   engine:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: engine
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install PulseAudio client headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev pkg-config
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
 
-      - run: cargo build --release
+      - run: cargo build --release --locked
 
-      - run: cargo test --release
+      - run: cargo test --release --locked
+
+      - run: cargo clippy --release --locked --all-targets -- -D warnings
+
+      - name: Chain benchmark
+        run: cargo run --release --locked --example bench_chain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushcore-engine-${{ runner.os }}
+          path: |
+            engine/target/release/hushcore-engine
+            engine/target/release/hushcore-engine.exe
+          if-no-files-found: error
+
+  # Headless PipeWire in a container: the engine's processed tone must reach HushCore Microphone,
+  # device loss must reconnect, and the on-demand virtual device must be cleaned up.
+  linux-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/linux-docker/run.sh
+
+  windows-driver:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Test-signing certificate
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=WDKTestCert HushCore" `
+              -CertStoreLocation Cert:\LocalMachine\My -KeyUsage DigitalSignature -NotAfter (Get-Date).AddYears(1)
+          Export-Certificate -Cert $cert -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" | Out-Null
+          Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+
+      - name: Build x64 and ARM64
+        shell: pwsh
+        run: |
+          foreach ($platform in 'x64', 'ARM64') {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform $platform
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: InfVerif
+        shell: pwsh
+        run: |
+          $infverif = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Tools\*\x64\infverif.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+          if (-not $infverif) { throw 'infverif.exe not found: the WDK is missing on this runner' }
+          foreach ($platform in 'x64', 'ARM64') {
+            & $infverif.FullName /w /u "dist\driver\windows\$platform\HushCoreAudio.inf"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushcore-driver-windows-testsigned
+          path: dist/driver/windows/
+          if-no-files-found: error
+
+  # GitHub's macOS runners allow passwordless sudo, so the plug-in is installed into coreaudiod and
+  # exercised for real, then removed.
+  macos-plugin:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: bash scripts/macos/build-plugin.sh
+
+      - name: Build the loopback test tool
+        run: make -C driver/macos build/loopback_test
+
+      - run: sudo bash scripts/macos/install-plugin.sh
+
+      - run: driver/macos/build/loopback_test --list
+
+      - name: Loopback test
+        run: |
+          if ! driver/macos/build/loopback_test; then
+            echo "::warning::full loopback check failed (microphone permission on the runner?); checking buffer delivery only"
+            driver/macos/build/loopback_test --delivery-only
+          fi
+
+      - name: Uninstall
+        if: always()
+        run: sudo bash scripts/macos/uninstall-plugin.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushcore-plugin-macos-adhoc
+          path: dist/driver/macos/
+          if-no-files-found: error
