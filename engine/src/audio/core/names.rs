@@ -1,6 +1,10 @@
 //! Device-name matching rules from PROTOCOL.md. Pure logic, so it is tested without audio hardware.
 
-const VIRTUAL_CABLE_HINTS: [&str; 3] = ["cable", "virtual", "vb-audio"];
+/// Render endpoint the engine writes to. Every platform's virtual device uses this name (on Windows the
+/// endpoint name is followed by the adapter name in parentheses, so matching is by substring).
+pub const SINK_NAME: &str = "HushCore Sink";
+/// Capture endpoint other apps read the processed voice from.
+pub const MICROPHONE_NAME: &str = "HushCore Microphone";
 
 /// Removes a trailing ` [host API]` suffix that the UI appends to device names.
 pub fn strip_host_suffix(name: &str) -> &str {
@@ -27,17 +31,33 @@ pub fn match_device(requested: &str, names: &[String]) -> Option<usize> {
         .or_else(|| lowered.iter().position(|n| n.contains(&want)))
 }
 
-pub fn is_virtual_cable(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    VIRTUAL_CABLE_HINTS.iter().any(|hint| lower.contains(hint))
+fn contains_ignore_case(name: &str, needle: &str) -> bool {
+    name.to_lowercase().contains(&needle.to_lowercase())
 }
 
-/// Output picked when the request is empty: a virtual cable if one is present, else the default endpoint.
+/// True for HushCore's own virtual sink.
+pub fn is_hushcore_sink(name: &str) -> bool {
+    contains_ignore_case(name, SINK_NAME)
+}
+
+/// True for HushCore's own virtual microphone. The engine never captures from it by default, which
+/// would feed its own output back into its input.
+pub fn is_hushcore_microphone(name: &str) -> bool {
+    contains_ignore_case(name, MICROPHONE_NAME)
+}
+
+/// Output picked when the request is empty: the HushCore sink if installed, else the default endpoint.
 pub fn default_output_index(names: &[String], default_index: Option<usize>) -> Option<usize> {
-    names
-        .iter()
-        .position(|n| is_virtual_cable(n))
-        .or(default_index)
+    names.iter().position(|n| is_hushcore_sink(n)).or(default_index)
+}
+
+/// Input picked when the request is empty: the default endpoint, unless that is the HushCore
+/// microphone (a feedback loop), in which case the first other input.
+pub fn default_input_index(names: &[String], default_index: Option<usize>) -> Option<usize> {
+    match default_index {
+        Some(i) if names.get(i).is_some_and(|n| !is_hushcore_microphone(n)) => Some(i),
+        _ => names.iter().position(|n| !is_hushcore_microphone(n)),
+    }
 }
 
 #[cfg(test)]
@@ -68,8 +88,8 @@ mod tests {
 
     #[test]
     fn falls_back_to_substring() {
-        let list = names(&["Microphone Array (Intel)", "CABLE Output (VB-Audio)"]);
-        assert_eq!(match_device("cable output", &list), Some(1));
+        let list = names(&["Microphone Array (Intel)", "HushCore Microphone (HushCore Virtual Audio)"]);
+        assert_eq!(match_device("hushcore microphone", &list), Some(1));
         assert_eq!(match_device("nope", &list), None);
     }
 
@@ -80,11 +100,20 @@ mod tests {
     }
 
     #[test]
-    fn output_default_prefers_virtual_cable() {
-        let list = names(&["Speakers", "CABLE Input (VB-Audio Virtual Cable)"]);
+    fn output_default_prefers_hushcore_sink() {
+        let list = names(&["Speakers", "HushCore Sink (HushCore Virtual Audio)"]);
         assert_eq!(default_output_index(&list, Some(0)), Some(1));
         let plain = names(&["Speakers", "Headphones"]);
         assert_eq!(default_output_index(&plain, Some(1)), Some(1));
         assert_eq!(default_output_index(&plain, None), None);
+    }
+
+    #[test]
+    fn input_default_never_picks_hushcore_microphone() {
+        let list = names(&["HushCore Microphone (HushCore Virtual Audio)", "Mic (USB)"]);
+        assert_eq!(default_input_index(&list, Some(0)), Some(1));
+        assert_eq!(default_input_index(&list, Some(1)), Some(1));
+        assert_eq!(default_input_index(&list, None), Some(1));
+        assert_eq!(default_input_index(&names(&["HushCore Microphone"]), Some(0)), None);
     }
 }

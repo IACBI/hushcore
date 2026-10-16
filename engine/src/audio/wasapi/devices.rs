@@ -1,6 +1,6 @@
 //! Endpoint enumeration, name resolution and the period probes shown in `devices` and `probe`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use windows::core::{Interface, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
@@ -10,7 +10,8 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ};
 
 use super::com::{mix_format, take_pwstr, OwnedFormat};
-use super::names;
+use crate::audio::core::names;
+pub use crate::audio::core::DeviceSummary;
 
 /// The engine's device enumerator. Requires COM to be initialised on the calling thread.
 pub struct Enumerator {
@@ -21,14 +22,6 @@ pub struct Endpoint {
     pub device: IMMDevice,
     pub name: String,
     pub is_default: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeviceSummary {
-    pub name: String,
-    pub is_default: bool,
-    pub min_period_ms: f32,
-    pub sample_rate: u32,
 }
 
 /// Periods of one endpoint in milliseconds. `shared_*` are None when IAudioClient3 is unavailable.
@@ -168,8 +161,9 @@ pub fn summaries(enumerator: &Enumerator, flow: EDataFlow) -> Result<Vec<DeviceS
     Ok(out)
 }
 
-/// Resolves a UI device name to an endpoint. An empty request means the default: for output, a
-/// virtual cable is preferred when `prefer_virtual` is set (PROTOCOL.md).
+/// Resolves a UI device name to an endpoint. An empty request means the default: for output, the
+/// HushCore sink is preferred when `prefer_virtual` is set; for input, the HushCore microphone is
+/// skipped so the engine never captures its own output (PROTOCOL.md).
 pub fn resolve(enumerator: &Enumerator, flow: EDataFlow, requested: &str, prefer_virtual: bool) -> Result<Endpoint> {
     let mut endpoints = enumerator.endpoints(flow)?;
     let names: Vec<String> = endpoints.iter().map(|e| e.name.clone()).collect();
@@ -177,10 +171,14 @@ pub fn resolve(enumerator: &Enumerator, flow: EDataFlow, requested: &str, prefer
 
     if wanted.is_empty() {
         let default_index = endpoints.iter().position(|e| e.is_default);
-        let index = if flow == eRender && prefer_virtual {
-            names::default_output_index(&names, default_index)
+        let index = if flow == eRender {
+            if prefer_virtual {
+                names::default_output_index(&names, default_index)
+            } else {
+                default_index
+            }
         } else {
-            default_index
+            names::default_input_index(&names, default_index)
         };
         let index = index.ok_or_else(|| anyhow!("no default {} device", flow_name(flow)))?;
         return Ok(endpoints.swap_remove(index));
@@ -188,6 +186,9 @@ pub fn resolve(enumerator: &Enumerator, flow: EDataFlow, requested: &str, prefer
 
     let index = names::match_device(wanted, &names)
         .ok_or_else(|| anyhow!("no {} device matches \"{}\"", flow_name(flow), wanted))?;
+    if flow == eCapture && names::is_hushcore_microphone(&names[index]) {
+        bail!("{} is HushCore's own output; choose a physical microphone", names::MICROPHONE_NAME);
+    }
     Ok(endpoints.swap_remove(index))
 }
 

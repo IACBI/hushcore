@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::{DeviceSummary, StreamMode};
+use crate::audio::{DeviceSummary, StreamMode, VirtualDeviceStatus};
 use crate::settings::Settings;
 
 /// Parameters of `start`. Missing fields take the protocol defaults.
@@ -36,11 +36,16 @@ pub enum Command {
     Quit,
 }
 
-/// What the stdin reader delivers to the control loop.
+/// What the control loop receives: stdin lines from the reader thread, and device failures from a
+/// session's status thread.
 #[derive(Debug)]
 pub enum Inbound {
     Line(String),
     Eof,
+    /// A command line longer than `MAX_LINE_BYTES` was skipped.
+    TooLong,
+    /// Session `session` lost a device; the supervisor restarts it if that session is still current.
+    DeviceLost { session: u64, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -79,6 +84,7 @@ pub enum Event {
     Devices {
         inputs: Vec<DeviceInfo>,
         outputs: Vec<DeviceInfo>,
+        virtual_device: VirtualDeviceStatus,
     },
     Started {
         sample_rate: u32,
@@ -88,6 +94,13 @@ pub enum Event {
         latency_ms: f32,
     },
     Stopped,
+    /// The session lost a device and is being reopened. Ends with `started` (success) or `stopped`
+    /// (the backend sent `stop`). Streams are closed in between, so no `status` is sent.
+    Reconnecting {
+        reason: String,
+        attempt: u32,
+        retry_in_ms: u64,
+    },
     Status(Status),
     Error {
         message: String,
@@ -132,16 +145,80 @@ pub fn spawn_writer(events: Receiver<Event>) -> io::Result<JoinHandle<()>> {
     })
 }
 
-/// Reads stdin on its own thread. Sends `Eof` when the backend closes the pipe.
+/// Longest accepted command line. Real commands are a few kilobytes at most; a longer line is
+/// dropped (and reported) instead of growing the engine's memory without bound.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// One line of input, or a line that was too long and has been skipped up to its newline.
+#[derive(Debug, PartialEq)]
+pub enum ReadLine {
+    Line(String),
+    TooLong,
+    Eof,
+}
+
+/// Reads one newline-terminated line, holding at most `max` bytes in memory.
+pub fn read_bounded_line(input: &mut impl BufRead, max: usize) -> io::Result<ReadLine> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    loop {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            return Ok(if too_long {
+                ReadLine::TooLong
+            } else if line.is_empty() {
+                ReadLine::Eof
+            } else {
+                ReadLine::Line(String::from_utf8_lossy(&line).into_owned())
+            });
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let chunk = &available[..newline.unwrap_or(available.len())];
+        if !too_long {
+            if line.len() + chunk.len() > max {
+                too_long = true;
+                line = Vec::new();
+            } else {
+                line.extend_from_slice(chunk);
+            }
+        }
+        let consumed = newline.map_or(available.len(), |i| i + 1);
+        input.consume(consumed);
+        if newline.is_some() {
+            if too_long {
+                return Ok(ReadLine::TooLong);
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(ReadLine::Line(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
+}
+
+/// Reads stdin on its own thread. Sends `Eof` when the backend closes the pipe. It holds no event
+/// sender: the stdout writer exits when the last one drops, and this thread may still be blocked in
+/// a read at shutdown.
 pub fn spawn_reader(inbound: Sender<Inbound>) -> io::Result<JoinHandle<()>> {
     thread::Builder::new().name("hushcore-ipc-in".into()).spawn(move || {
-        for line in io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            if inbound.send(Inbound::Line(line)).is_err() {
-                return;
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        loop {
+            match read_bounded_line(&mut input, MAX_LINE_BYTES) {
+                Ok(ReadLine::Line(line)) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if inbound.send(Inbound::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                Ok(ReadLine::TooLong) => {
+                    if inbound.send(Inbound::TooLong).is_err() {
+                        return;
+                    }
+                }
+                Ok(ReadLine::Eof) | Err(_) => break,
             }
         }
         let _ = inbound.send(Inbound::Eof);
@@ -242,9 +319,48 @@ mod tests {
         let event = Event::Devices {
             inputs: vec![DeviceInfo { name: "Mic".into(), default: true, min_period_ms: 10.0, sample_rate: 48_000 }],
             outputs: vec![],
+            virtual_device: VirtualDeviceStatus {
+                installed: false,
+                provider: "none",
+                sink: None,
+                microphone: None,
+                detail: "HushCore virtual device is not installed".into(),
+            },
         };
         let v: serde_json::Value = serde_json::from_str(&encode(&event)).unwrap();
         assert_eq!(v["inputs"][0]["default"], true);
         assert_eq!(v["outputs"].as_array().unwrap().len(), 0);
+        assert_eq!(v["virtual_device"]["installed"], false);
+        assert!(v["virtual_device"]["sink"].is_null());
+    }
+
+    #[test]
+    fn bounded_reader_splits_lines_and_skips_oversized_ones() {
+        let data = format!("a\r\n{}\nb\nlast", "x".repeat(100));
+        let mut input = io::BufReader::with_capacity(7, data.as_bytes());
+        let mut got = Vec::new();
+        loop {
+            match read_bounded_line(&mut input, 10).unwrap() {
+                ReadLine::Eof => break,
+                other => got.push(other),
+            }
+        }
+        assert_eq!(
+            got,
+            [ReadLine::Line("a".into()), ReadLine::TooLong, ReadLine::Line("b".into()), ReadLine::Line("last".into())]
+        );
+    }
+
+    #[test]
+    fn reconnecting_serialises() {
+        let v: serde_json::Value = serde_json::from_str(&encode(&Event::Reconnecting {
+            reason: "input device lost".into(),
+            attempt: 2,
+            retry_in_ms: 500,
+        }))
+        .unwrap();
+        assert_eq!(v["event"], "reconnecting");
+        assert_eq!(v["attempt"], 2);
+        assert_eq!(v["retry_in_ms"], 500);
     }
 }

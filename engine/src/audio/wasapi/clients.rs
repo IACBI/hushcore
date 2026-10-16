@@ -14,13 +14,8 @@ use windows::Win32::System::Com::CLSCTX_ALL;
 use super::com::{as_audio_client, mix_format, AutoEvent, OwnedFormat};
 use super::devices::shared_engine_periods;
 use super::format::StreamFormat;
-use super::ring::frames_to_ms;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamMode {
-    Shared,
-    Exclusive,
-}
+use crate::audio::core::ring::frames_to_ms;
+pub use crate::audio::core::StreamMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitKind {

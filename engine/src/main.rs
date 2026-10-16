@@ -1,19 +1,21 @@
-//! hushcore-engine: native WASAPI audio engine.
+//! hushcore-engine: native low-latency audio engine (WASAPI on Windows, Core Audio on macOS,
+//! PulseAudio/PipeWire on Linux).
 //!
 //! Without arguments (or `serve`) it speaks the JSON-lines protocol on stdin/stdout (see PROTOCOL.md).
-//! Diagnostics: `devices`, `probe`, and `selftest <seconds> [shared|exclusive]` (output is always muted).
+//! Diagnostics: `devices`, `probe`, `virtual-device`, and `selftest <seconds> [shared|exclusive]`
+//! (output is always muted).
 
 use std::process::ExitCode;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use windows::Win32::Media::Audio::{eCapture, eRender};
 
-use hushcore_engine::audio::{self, ComInit, Controller, Enumerator, Session, StartRequest};
-use hushcore_engine::ipc::{self, Command, DeviceInfo, Event, Inbound, StartParams};
+use hushcore_engine::audio::{self, Controller, DeviceList, PlatformInit, Session, SessionLinks, StartRequest};
+use hushcore_engine::ipc::{self, DeviceInfo, Event, Inbound};
 use hushcore_engine::settings::Settings;
+use hushcore_engine::supervisor::{Backend, Supervisor};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -21,9 +23,10 @@ fn main() -> ExitCode {
         None | Some("serve") => serve(),
         Some("devices") => devices_cmd(),
         Some("probe") => probe_cmd(),
+        Some("virtual-device") => virtual_device_cmd(),
         Some("selftest") => selftest_cmd(&args[1..]),
         Some(other) => Err(anyhow!(
-            "unknown subcommand \"{other}\" (expected serve, devices, probe or selftest <seconds> [shared|exclusive])"
+            "unknown subcommand \"{other}\" (expected serve, devices, probe, virtual-device or selftest <seconds> [shared|exclusive])"
         )),
     };
     match result {
@@ -35,157 +38,116 @@ fn main() -> ExitCode {
     }
 }
 
+/// The compiled-in platform backend behind the supervisor.
+struct Platform;
+
+impl Backend for Platform {
+    type Session = Session;
+
+    fn start(&mut self, req: &StartRequest, controller: &Arc<Controller>, links: &SessionLinks) -> Result<Session> {
+        Session::start(req, controller, links)
+    }
+
+    fn set_monitor(&mut self, session: &mut Session, enabled: bool, device: &str) -> Result<()> {
+        session.set_monitor(enabled, device)
+    }
+
+    fn stop(&mut self, session: Session) {
+        session.stop();
+    }
+
+    fn abandon(&mut self, session: Session) {
+        session.abandon();
+    }
+
+    fn devices_event(&mut self) -> Result<Event> {
+        devices_event()
+    }
+}
+
 fn serve() -> Result<()> {
-    let _com = ComInit::new()?;
+    let _init = PlatformInit::new()?;
     let (out_tx, out_rx) = mpsc::channel::<Event>();
     let writer = ipc::spawn_writer(out_rx).context("cannot start stdout writer")?;
     let (in_tx, in_rx) = mpsc::channel::<Inbound>();
-    ipc::spawn_reader(in_tx).context("cannot start stdin reader")?;
+    ipc::spawn_reader(in_tx.clone()).context("cannot start stdin reader")?;
 
-    let mut server = Server { controller: Arc::new(Controller::default()), session: None, events: out_tx.clone() };
-    server.emit(Event::Ready { version: ipc::ENGINE_VERSION });
+    let mut supervisor = Supervisor::new(Platform, Arc::new(Controller::default()), out_tx.clone(), in_tx);
+    let _ = out_tx.send(Event::Ready { version: ipc::ENGINE_VERSION });
 
-    while let Ok(message) = in_rx.recv() {
+    loop {
+        let message = match supervisor.deadline() {
+            Some(due) => match in_rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                Ok(message) => Some(message),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match in_rx.recv() {
+                Ok(message) => Some(message),
+                Err(_) => break,
+            },
+        };
         match message {
-            Inbound::Eof => break,
-            Inbound::Line(line) => match ipc::parse_command(&line) {
-                Ok(Command::Quit) => break,
-                Ok(command) => server.handle(command),
-                Err(message) => server.error(message),
+            None => supervisor.tick(Instant::now()),
+            Some(Inbound::Eof) => break,
+            Some(Inbound::TooLong) => {
+                let message = format!("command line longer than {} bytes ignored", ipc::MAX_LINE_BYTES);
+                let _ = out_tx.send(Event::Error { message, fatal: false });
+            }
+            Some(Inbound::DeviceLost { session, reason }) => supervisor.device_lost(session, reason, Instant::now()),
+            Some(Inbound::Line(line)) => match ipc::parse_command(&line) {
+                Ok(ipc::Command::Quit) => break,
+                Ok(command) => supervisor.handle(command),
+                Err(message) => {
+                    let _ = out_tx.send(Event::Error { message, fatal: false });
+                }
             },
         }
     }
 
-    if let Some(session) = server.session.take() {
-        session.stop();
-    }
-    drop(server);
+    supervisor.shutdown();
+    drop(supervisor);
     drop(out_tx);
     let _ = writer.join();
     Ok(())
 }
 
-/// Owns the live session. Runs only on the control thread; audio threads never touch it.
-struct Server {
-    controller: Arc<Controller>,
-    session: Option<Session>,
-    events: Sender<Event>,
-}
-
-impl Server {
-    fn emit(&self, event: Event) {
-        let _ = self.events.send(event);
-    }
-
-    fn error(&self, message: impl Into<String>) {
-        self.emit(Event::Error { message: message.into(), fatal: false });
-    }
-
-    fn handle(&mut self, command: Command) {
-        match command {
-            Command::Devices => match devices_event() {
-                Ok(event) => self.emit(event),
-                Err(e) => self.error(format!("device enumeration failed: {e:#}")),
-            },
-            Command::Start(params) => self.start(params),
-            Command::Settings { settings } => self.controller.set_settings(settings),
-            Command::Monitor { enabled, device } => {
-                let result = match self.session.as_mut() {
-                    Some(session) => session.set_monitor(enabled, &device),
-                    // Monitoring is part of `start` while stopped; a stray monitor command is not an error.
-                    None => Ok(()),
-                };
-                match result {
-                    Ok(()) => eprintln!("monitor: enabled={enabled} device=\"{device}\""),
-                    Err(e) => self.error(format!("{e:#}")),
-                }
-            }
-            Command::Stop => self.stop(),
-            Command::Quit => {}
-        }
-    }
-
-    fn start(&mut self, params: StartParams) {
-        if let Some(session) = self.session.take() {
-            session.stop();
-        }
-        if let Some(settings) = params.settings {
-            self.controller.set_settings(settings);
-        }
-        let mode = match ipc::parse_mode(&params.mode) {
-            Ok(mode) => mode,
-            Err(message) => return self.error(message),
-        };
-        let request = StartRequest {
-            input: params.input,
-            output: params.output,
-            monitor: params.monitor,
-            monitor_enabled: params.monitor_enabled,
-            mode,
-            mute_output: false,
-        };
-        match Session::start(&request, &self.controller, &self.events) {
-            Ok(mut session) => {
-                if request.monitor_enabled {
-                    if let Err(e) = session.set_monitor(true, &request.monitor) {
-                        self.error(format!("{e:#}"));
-                    }
-                }
-                self.session = Some(session);
-            }
-            Err(e) => self.error(format!("could not start audio: {e:#}")),
-        }
-    }
-
-    /// Stops the session if one is running. Always leaves the backend with a `stopped` event.
-    fn stop(&mut self) {
-        match self.session.take() {
-            Some(session) => session.stop(),
-            None => self.emit(Event::Stopped),
-        }
-    }
-}
-
 fn devices_event() -> Result<Event> {
-    let enumerator = Enumerator::new()?;
-    let inputs = audio::devices::summaries(&enumerator, eCapture)?.into_iter().map(DeviceInfo::from).collect();
-    let outputs = audio::devices::summaries(&enumerator, eRender)?.into_iter().map(DeviceInfo::from).collect();
-    Ok(Event::Devices { inputs, outputs })
+    let list = audio::list_devices()?;
+    let virtual_device = audio::virtual_device(&list);
+    let DeviceList { inputs, outputs } = list;
+    Ok(Event::Devices {
+        inputs: inputs.into_iter().map(DeviceInfo::from).collect(),
+        outputs: outputs.into_iter().map(DeviceInfo::from).collect(),
+        virtual_device,
+    })
 }
 
 fn devices_cmd() -> Result<()> {
-    let _com = ComInit::new()?;
+    let _init = PlatformInit::new()?;
     println!("{}", ipc::encode(&devices_event()?));
     Ok(())
 }
 
-fn fmt_ms(value: Option<f32>) -> String {
-    value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.2}"))
-}
-
 fn probe_cmd() -> Result<()> {
-    let _com = ComInit::new()?;
-    let enumerator = Enumerator::new()?;
-    for (label, flow) in [("capture", eCapture), ("render ", eRender)] {
-        for endpoint in enumerator.endpoints(flow)? {
-            let marker = if endpoint.is_default { "*" } else { " " };
-            match audio::devices::periods(&endpoint.device) {
-                Ok(p) => println!(
-                    "{label} {marker} {:<52} {:>6} Hz  shared ms: default {} fundamental {} min {} max {}  device ms: default {:.2} min {:.2}",
-                    endpoint.name,
-                    p.sample_rate,
-                    fmt_ms(p.shared_default_ms),
-                    fmt_ms(p.shared_fundamental_ms),
-                    fmt_ms(p.shared_min_ms),
-                    fmt_ms(p.shared_max_ms),
-                    p.device_default_ms,
-                    p.device_min_ms,
-                ),
-                Err(e) => println!("{label} {marker} {:<52} probe failed: {e:#}", endpoint.name),
-            }
-        }
+    let _init = PlatformInit::new()?;
+    for line in audio::probe()? {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// Prints the virtual-device status as one JSON object; exits non-zero when it is not installed,
+/// so install scripts and CI can use it as a check.
+fn virtual_device_cmd() -> Result<()> {
+    let _init = PlatformInit::new()?;
+    let status = audio::virtual_device(&audio::list_devices()?);
+    println!("{}", serde_json::to_string(&status)?);
+    if status.installed {
+        Ok(())
+    } else {
+        Err(anyhow!("{}", status.detail))
+    }
 }
 
 /// Collects events from a selftest run for the summary line.
@@ -216,19 +178,22 @@ impl Tally {
 fn selftest_cmd(args: &[String]) -> Result<()> {
     let seconds: f64 = args
         .first()
-        .ok_or_else(|| anyhow!("usage: selftest <seconds> [shared|exclusive]"))?
+        .ok_or_else(|| anyhow!("usage: selftest <seconds> [shared|exclusive] [output device]"))?
         .parse()
         .context("seconds must be a number")?;
     let mode = ipc::parse_mode(args.get(1).map_or("", String::as_str)).map_err(|e| anyhow!(e))?;
+    let output = args.get(2).cloned().unwrap_or_default();
 
-    let _com = ComInit::new()?;
+    let _init = PlatformInit::new()?;
     let controller = Arc::new(Controller::default());
     // Output is muted twice: gain 0 in the settings, and the render thread writes silence (mute_output).
     controller.set_settings(Settings { output_gain: 0.0, ..Settings::default() });
     let (tx, rx) = mpsc::channel::<Event>();
+    let (control_tx, control_rx) = mpsc::channel::<Inbound>();
+    let links = SessionLinks { events: tx, control: control_tx, session_id: 1 };
     let request = StartRequest {
         input: String::new(),
-        output: String::new(),
+        output,
         monitor: String::new(),
         monitor_enabled: false,
         mode,
@@ -236,7 +201,7 @@ fn selftest_cmd(args: &[String]) -> Result<()> {
     };
 
     let mut tally = Tally::default();
-    let session = Session::start(&request, &controller, &tx).context("selftest could not start")?;
+    let session = Session::start(&request, &controller, &links).context("selftest could not start")?;
     for event in rx.try_iter() {
         tally.absorb(event);
     }
@@ -252,6 +217,11 @@ fn selftest_cmd(args: &[String]) -> Result<()> {
     session.stop();
     for event in rx.try_iter() {
         tally.absorb(event);
+    }
+    for message in control_rx.try_iter() {
+        if let Inbound::DeviceLost { reason, .. } = message {
+            tally.errors.push(reason);
+        }
     }
 
     let (sample_rate, mode_name, input_ms, output_ms, started_latency) =

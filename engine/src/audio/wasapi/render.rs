@@ -14,8 +14,8 @@ use super::clients::{InitKind, Opened};
 use super::com::{buffer_slice, ComInit, MmcssGuard, MtaPayload, Wait};
 use super::format::{write_mono, StreamFormat};
 use super::clients::SILENT_FLAG;
-use super::ring::{plan_render, smooth, RingBounds};
-use super::session::{Shared, FAIL_MONITOR, FAIL_RENDER};
+use crate::audio::core::ring::RingBounds;
+use crate::audio::core::{RingRenderer, Shared, FAIL_MONITOR, FAIL_RENDER};
 
 pub struct RenderJob {
     pub opened: Opened,
@@ -40,7 +40,7 @@ pub fn spawn(job: RenderJob) -> Result<JoinHandle<Consumer<f32>>> {
 }
 
 fn run(job: RenderJob) -> Consumer<f32> {
-    let RenderJob { opened, service, mut consumer, shared, stop, is_main, muted, bounds, ready } = job;
+    let RenderJob { opened, service, consumer, shared, stop, is_main, muted, bounds, ready } = job;
     let _com = match ComInit::new() {
         Ok(c) => c,
         Err(e) => {
@@ -50,29 +50,18 @@ fn run(job: RenderJob) -> Consumer<f32> {
     };
     let _mmcss = MmcssGuard::enter_pro_audio();
 
+    let mut ring = RingRenderer::new(consumer, shared.clone(), is_main, muted, bounds);
     if !is_main {
         // Audio queued before the monitor was enabled is stale; drop it before playing anything.
-        let stale = consumer.slots();
-        if stale > 0 {
-            if let Ok(chunk) = consumer.read_chunk(stale) {
-                chunk.commit_all();
-            }
-        }
+        ring.drop_stale();
     }
 
-    let format = opened.format;
-    let buffer_frames = opened.buffer_frames;
     let mut renderer = Renderer {
         client: opened.client,
         service,
-        consumer,
-        shared: shared.clone(),
-        is_main,
-        muted: muted && is_main,
-        format,
-        buffer_frames,
-        bounds,
-        fill_frames: 0.0,
+        ring,
+        format: opened.format,
+        buffer_frames: opened.buffer_frames,
         exclusive: opened.init == InitKind::Exclusive,
     };
 
@@ -119,10 +108,10 @@ fn run(job: RenderJob) -> Consumer<f32> {
     }
     if failed {
         if is_main {
-            shared.failed.store(FAIL_RENDER, Relaxed);
+            shared.fail(FAIL_RENDER);
         } else {
             shared.monitor_active.store(false, Relaxed);
-            shared.failed.store(FAIL_MONITOR, Relaxed);
+            shared.fail(FAIL_MONITOR);
         }
     }
     // SAFETY: stopping a started client is always valid; errors on the way out have no recovery.
@@ -133,20 +122,15 @@ fn run(job: RenderJob) -> Consumer<f32> {
 struct Renderer {
     client: IAudioClient,
     service: IAudioRenderClient,
-    consumer: Consumer<f32>,
-    shared: Arc<Shared>,
-    is_main: bool,
-    muted: bool,
+    ring: RingRenderer,
     format: StreamFormat,
     buffer_frames: u32,
-    bounds: RingBounds,
-    fill_frames: f32,
     exclusive: bool,
 }
 
 impl Renderer {
     fn into_consumer(self) -> Consumer<f32> {
-        self.consumer
+        self.ring.into_consumer()
     }
 
     fn prefill_silence(&mut self) -> std::result::Result<(), String> {
@@ -163,7 +147,7 @@ impl Renderer {
         unsafe { self.service.ReleaseBuffer(frames, SILENT_FLAG) }.map_err(|e| e.to_string())
     }
 
-    /// One event callback: decide, fill the device buffer, release it. `Err` means the device is gone.
+    /// One event callback: fill the free part of the device buffer and release it. `Err` means the device is gone.
     fn tick(&mut self) -> std::result::Result<(), ()> {
         // Exclusive streams are event-driven on whole buffers: each event frees one full period, and
         // GetCurrentPadding reports the occupied buffer, not free space, so it is only used in shared mode.
@@ -178,72 +162,18 @@ impl Renderer {
             return Ok(());
         }
 
-        let queued = self.consumer.slots();
-        let plan = plan_render(queued, wanted, self.bounds);
-        if self.is_main {
-            self.shared.counts.render_callbacks.fetch_add(1, Relaxed);
-        }
-        if plan.discard > 0 {
-            if let Ok(chunk) = self.consumer.read_chunk(plan.discard) {
-                chunk.commit_all();
-            }
-            if self.is_main {
-                self.shared.counts.render_discards.fetch_add(1, Relaxed);
-                self.shared.counts.discarded_frames.fetch_add(plan.discard as u64, Relaxed);
-            }
-        }
-        if plan.slew_drop > 0 {
-            let _ = self.consumer.pop();
-            if self.is_main {
-                self.shared.counts.slew_drops.fetch_add(1, Relaxed);
-            }
-        }
-        if plan.repeat > 0 && self.is_main {
-            self.shared.counts.slew_repeats.fetch_add(1, Relaxed);
-        }
-        if self.is_main {
-            if plan.underrun() {
-                self.shared.counts.underruns.fetch_add(1, Relaxed);
-            }
-            self.shared.counts.rendered_frames.fetch_add(plan.take as u64, Relaxed);
-            self.shared.counts.silence_frames.fetch_add(plan.silence as u64, Relaxed);
-        }
-
-        let frame_bytes = self.format.frame_bytes();
+        let format = self.format;
+        let frame_bytes = format.frame_bytes();
         // SAFETY: the padding query says `wanted` frames are free; the slice ends at ReleaseBuffer below.
         let ptr = unsafe { self.service.GetBuffer(wanted as u32) }.map_err(|_| ())?;
         let dst = unsafe { buffer_slice(ptr, wanted * frame_bytes) }.ok_or(())?;
-
-        // Muting only replaces the audio with silence; the ring is always consumed so latency stays bounded.
-        let mut written = 0;
-        if plan.take > 0 {
-            if let Ok(chunk) = self.consumer.read_chunk(plan.take) {
-                if !self.muted {
-                    let (first, second) = chunk.as_slices();
-                    let split = first.len() * frame_bytes;
-                    write_mono(&mut dst[..split], first, &self.format);
-                    write_mono(&mut dst[split..plan.take * frame_bytes], second, &self.format);
-                    written = plan.take;
-                    if plan.repeat > 0 {
-                        let last = second.last().or(first.last()).copied().unwrap_or(0.0);
-                        write_mono(&mut dst[written * frame_bytes..(written + 1) * frame_bytes], &[last], &self.format);
-                        written += 1;
-                    }
-                }
-                chunk.commit_all();
-            }
-        }
+        let written = self.ring.render(wanted, |offset, samples| {
+            write_mono(&mut dst[offset * frame_bytes..(offset + samples.len()) * frame_bytes], samples, &format);
+        });
         dst[written * frame_bytes..].fill(0);
 
         let flags = if written == 0 { SILENT_FLAG } else { 0 };
         // SAFETY: releases exactly the frames obtained from GetBuffer above.
-        unsafe { self.service.ReleaseBuffer(wanted as u32, flags) }.map_err(|_| ())?;
-
-        if self.is_main {
-            let fill = (queued - plan.discard) as f32;
-            self.fill_frames = smooth(self.fill_frames, fill);
-            self.shared.render_fill_bits.store(self.fill_frames.to_bits(), Relaxed);
-        }
-        Ok(())
+        unsafe { self.service.ReleaseBuffer(wanted as u32, flags) }.map_err(|_| ())
     }
 }
