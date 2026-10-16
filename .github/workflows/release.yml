@@ -1,0 +1,125 @@
+name: Release
+
+# Builds every platform's artifacts for a version tag and attaches them to a draft GitHub release.
+# Signing for distribution (driver attestation, Developer ID, notarization) is a separate,
+# credentialed step; see docs/SIGNING.md. The artifacts here are labelled by their signing state.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            binary: hushcore-engine.exe
+          - os: macos-14
+            name: macos-universal
+            binary: hushcore-engine
+          - os: ubuntu-24.04
+            name: linux-x64
+            binary: hushcore-engine
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PulseAudio client headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Build
+        if: runner.os != 'macOS'
+        run: cargo build --release --locked --manifest-path engine/Cargo.toml
+      - name: Build universal binary
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked --manifest-path engine/Cargo.toml --target aarch64-apple-darwin
+          cargo build --release --locked --manifest-path engine/Cargo.toml --target x86_64-apple-darwin
+          mkdir -p engine/target/release
+          lipo -create -output engine/target/release/hushcore-engine \
+            engine/target/aarch64-apple-darwin/release/hushcore-engine \
+            engine/target/x86_64-apple-darwin/release/hushcore-engine
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "engine/target/release/${{ matrix.binary }}" out/
+          cd out && 7z a "../hushcore-engine-${GITHUB_REF_NAME}-${{ matrix.name }}.zip" . > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.name }}
+          path: hushcore-engine-*.zip
+
+  windows-driver:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Test-signing certificate
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=WDKTestCert HushCore" `
+              -CertStoreLocation Cert:\LocalMachine\My -KeyUsage DigitalSignature -NotAfter (Get-Date).AddYears(1)
+          Export-Certificate -Cert $cert -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" | Out-Null
+          Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+      - name: Build and package
+        shell: pwsh
+        run: |
+          foreach ($platform in 'x64', 'ARM64') {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform $platform
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          # Keep the repository layout: install-driver.ps1 resolves dist\driver\windows\<arch> two levels up.
+          7z a "hushcore-driver-$env:GITHUB_REF_NAME-windows-testsigned.zip" `
+              scripts\windows\install-driver.ps1 scripts\windows\uninstall-driver.ps1 dist\driver\windows | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-windows
+          path: hushcore-driver-*.zip
+
+  macos-plugin:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/macos/build-plugin.sh
+      - name: Package
+        run: |
+          # Keep the repository layout: install-plugin.sh looks for dist/driver/macos two levels up.
+          zip -qry "hushcore-plugin-${GITHUB_REF_NAME}-macos-adhoc.zip" \
+            scripts/macos/install-plugin.sh scripts/macos/uninstall-plugin.sh dist/driver/macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: hushcore-plugin-*.zip
+
+  publish:
+    needs: [engine, windows-driver, macos-plugin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Linux virtual-device files
+        run: |
+          # Keep the repository layout: install-virtual-mic.sh reads driver/linux two levels up.
+          zip -qr "artifacts/hushcore-virtual-mic-${GITHUB_REF_NAME}-linux.zip" driver/linux scripts/linux
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd artifacts && sha256sum * > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" artifacts/* --draft --title "HushCore $GITHUB_REF_NAME" \
+            --notes "Engine binaries for Windows, macOS and Linux; the Windows driver (test-signed, needs attestation signing before public distribution); the macOS plug-in (ad-hoc signed, needs Developer ID signing and notarization); the Linux virtual-microphone files. Extract an archive and run its installer from the extracted folder, for example scripts/linux/install-virtual-mic.sh. See docs/SIGNING.md."

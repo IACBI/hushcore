@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import secrets
+import sys
 import threading
 import time
 import urllib.request
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 from config import load_settings, save_settings, validate_and_coerce
 from audio_processor import AudioProcessor
 from engine_client import NativeEngineClient
+import virtual_device
 from presets import (
     BUILTIN_PRESETS,
     delete_user_preset,
@@ -60,6 +62,8 @@ ALLOWED_ORIGINS = {
     "http://localhost:3000",
 }
 AUTH_TIMEOUT_S = 5.0
+WS_UNAUTHENTICATED_LIMIT = 4
+_ws_unauthenticated = 0
 
 def _first_header(scope, name):
     for key, value in scope["headers"]:
@@ -116,6 +120,33 @@ async def auth_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Referrer-Policy": "no-referrer",
+}
+
+# Added after auth_middleware, so this wraps it and the 401 responses carry the headers too.
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+def _content_security_policy(nonce):
+    # The dashboard needs 'unsafe-inline' for styles only: index.html has style attributes, and the
+    # Google Fonts stylesheet it links is served from fonts.googleapis.com. The key script is nonce-based.
+    return (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
+        "connect-src 'self' ws://127.0.0.1:* ws://localhost:*; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+
 # Global settings and the active audio engine
 settings = load_settings()
 
@@ -129,11 +160,16 @@ ENGINE_PYTHON = "python"
 ENGINE_CHOICES = (ENGINE_AUTO, ENGINE_NATIVE, ENGINE_PYTHON)
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-_NATIVE_EXE_NAME = "hushcore-engine.exe"
-_NATIVE_EXE_CANDIDATES = (
-    os.path.join(_BACKEND_DIR, "bin", _NATIVE_EXE_NAME),
-    os.path.join(_BACKEND_DIR, os.pardir, "engine", "target", "release", _NATIVE_EXE_NAME),
-)
+
+def _native_exe_name():
+    return "hushcore-engine.exe" if sys.platform == "win32" else "hushcore-engine"
+
+def _native_candidates():
+    name = _native_exe_name()
+    return (
+        os.path.join(_BACKEND_DIR, "bin", name),
+        os.path.join(_BACKEND_DIR, os.pardir, "engine", "target", "release", name),
+    )
 
 def _resolve_engine_mode():
     raw = os.environ.get("HUSHCORE_ENGINE", "").strip().lower()
@@ -150,7 +186,7 @@ engine_mode = _resolve_engine_mode()
 _python_engine = None
 
 def _native_command():
-    for candidate in _NATIVE_EXE_CANDIDATES:
+    for candidate in _native_candidates():
         path = os.path.normpath(candidate)
         if os.path.isfile(path):
             return [path]
@@ -167,7 +203,7 @@ def _desired_engine():
         return ENGINE_PYTHON
     if _native_command() is None:
         if engine_mode == ENGINE_NATIVE:
-            logger.warning("Native engine requested but %s was not found; using the Python engine", _NATIVE_EXE_NAME)
+            logger.warning("Native engine requested but %s was not found; using the Python engine", _native_exe_name())
         return ENGINE_PYTHON
     return ENGINE_NATIVE
 
@@ -294,12 +330,29 @@ def _settings_snapshot():
 def health():
     return {"status": "ok", "version": APP_VERSION}
 
+def _virtual_device_status(devices):
+    """Status of HushCore's virtual microphone: the native engine's report when it is active, else the device list."""
+    if _engine_name(processor) == ENGINE_NATIVE:
+        reply = processor.virtual_device()
+        if reply is not None:
+            return virtual_device.status_from_engine(reply)
+    return virtual_device.status_from_devices(devices)
+
 @app.get("/api/devices")
 def get_devices():
     try:
-        return processor.get_devices()
+        devices = processor.get_devices()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    return {**devices, "virtual_device": _virtual_device_status(devices)}
+
+@app.get("/api/virtual-device")
+def get_virtual_device():
+    try:
+        devices = processor.get_devices()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _virtual_device_status(devices)
 
 @app.get("/api/settings")
 def get_settings():
@@ -387,7 +440,7 @@ def set_engine(body: EngineRequest):
         raise HTTPException(status_code=400, detail="Engine must be one of: auto, native, python")
     with settings_lock:
         if choice == ENGINE_NATIVE and _native_command() is None:
-            raise HTTPException(status_code=400, detail="Native engine binary (hushcore-engine.exe) was not found")
+            raise HTTPException(status_code=400, detail=f"Native engine binary ({_native_exe_name()}) was not found")
         engine_mode = choice
         _reconcile_engine()
     return {"status": "success", **_engine_state()}
@@ -419,6 +472,8 @@ def build_metrics():
     status.setdefault("xruns", getattr(current, "xruns", 0))
     status.setdefault("engine_mode", "shared")
     status.setdefault("engine_notice", None)
+    status.setdefault("reconnecting", False)
+    status.setdefault("reconnect_reason", None)
     return status
 
 async def _handle_ws_message(raw):
@@ -458,10 +513,21 @@ async def _ws_authenticated(websocket: WebSocket) -> bool:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    # Accept first: browsers only expose an application close code such as 4001 once the
+    global _ws_unauthenticated
+    # Accept first: browsers only expose an application close code such as 4001 or 1013 once the
     # handshake has completed. Refusing before accept surfaces as a bare HTTP 403.
     await websocket.accept()
-    if not await _ws_authenticated(websocket):
+    # Only the window before auth_ok is capped; a dashboard with several tabs open stays unaffected.
+    # The check and the increment run without an await in between, so the event loop cannot interleave them.
+    if _ws_unauthenticated >= WS_UNAUTHENTICATED_LIMIT:
+        await websocket.close(code=1013)
+        return
+    _ws_unauthenticated += 1
+    try:
+        authenticated = await _ws_authenticated(websocket)
+    finally:
+        _ws_unauthenticated -= 1
+    if not authenticated:
         await websocket.close(code=4001)
         return
     await websocket.send_text(json.dumps({"action": "auth_ok"}))
@@ -497,7 +563,7 @@ if os.path.exists(assets_path):
 else:
     logger.warning("Frontend static assets directory not found. Please compile frontend with Vite.")
 
-def get_injected_index():
+def get_injected_index(nonce):
     index_file = os.path.join(static_path, "index.html")
     if not os.path.exists(index_file):
         return "<h1>HushCore Frontend not compiled. Please run npm run build.</h1>"
@@ -506,21 +572,27 @@ def get_injected_index():
     # json.dumps keeps the value a valid JS string; escaping "<" stops the
     # value from closing the script tag early.
     key_literal = json.dumps(API_KEY).replace("<", "\\u003c")
-    injection = f'<script>window.HUSHCORE_API_KEY = {key_literal};</script>'
+    injection = f'<script nonce="{nonce}">window.HUSHCORE_API_KEY = {key_literal};</script>'
     content = content.replace("<head>", f"<head>{injection}")
     return content
 
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
+def _html_page():
+    # A fresh nonce per response: the injected key script is the only inline script the page runs.
+    nonce = secrets.token_urlsafe(16)
+    headers = {**NO_STORE_HEADERS, "Content-Security-Policy": _content_security_policy(nonce)}
+    return HTMLResponse(content=get_injected_index(nonce), headers=headers)
+
 @app.get("/")
 def serve_home():
-    return HTMLResponse(content=get_injected_index(), headers=NO_STORE_HEADERS)
+    return _html_page()
 
 @app.get("/{fallback_path:path}")
 def serve_spa_fallback(fallback_path: str):
     if fallback_path.startswith("assets/") or fallback_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="Not Found")
-    return HTMLResponse(content=get_injected_index(), headers=NO_STORE_HEADERS)
+    return _html_page()
 
 def _open_dashboard_when_ready(timeout=15.0):
     # Proxy-free opener: a system proxy must not intercept the local health check

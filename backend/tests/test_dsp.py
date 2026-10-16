@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -431,3 +432,74 @@ def test_init_com_is_safe_on_worker_threads():
     t.start()
     t.join()
     assert not errors
+
+
+@pytest.fixture
+def vst_dir():
+    # pytest's default temp root is not writable on some Windows profiles
+    with tempfile.TemporaryDirectory(prefix="hushcore-vst-") as directory:
+        yield directory
+
+
+@pytest.fixture
+def vst_loads(monkeypatch):
+    loads = []
+
+    class FakePlugin:
+        name = "fake"
+
+        def __init__(self, path):
+            loads.append(path)
+
+    monkeypatch.setattr(ap, "VST3Plugin", FakePlugin)
+    return loads
+
+
+def _vst_settings(path):
+    return {**DEFAULT_SETTINGS, "vst_enabled": True, "vst_path": path}
+
+
+@pytest.mark.parametrize("kind", ["relative", "wrong_suffix", "missing", "directory"])
+def test_vst_path_that_is_not_a_plugin_file_is_rejected(processor, vst_loads, vst_dir, kind):
+    if kind == "relative":
+        path = "plugin.vst3"
+    elif kind == "wrong_suffix":
+        path = os.path.join(vst_dir, "plugin.dll")
+        open(path, "wb").close()
+    elif kind == "missing":
+        path = os.path.join(vst_dir, "missing.vst3")
+    else:
+        path = os.path.join(vst_dir, "bundle.vst3")
+        os.mkdir(path)
+
+    processor.update_settings(_vst_settings(path))
+    assert processor.vst_plugin is None
+    assert processor.vst_failed is True
+    assert vst_loads == []
+
+
+def test_vst_bundle_directory_is_rejected_outside_macos(processor, vst_loads, vst_dir, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    path = os.path.join(vst_dir, "bundle.vst3")
+    os.mkdir(path)
+    processor.update_settings(_vst_settings(path))
+    assert processor.vst_failed is True
+    assert vst_loads == []
+
+
+def test_vst_bundle_directory_is_accepted_on_macos(processor, vst_loads, vst_dir, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    path = os.path.join(vst_dir, "bundle.vst3")
+    os.mkdir(path)
+    processor.update_settings(_vst_settings(path))
+    assert processor.vst_failed is False
+    assert vst_loads == [os.path.realpath(path)]
+
+
+def test_vst_file_with_uppercase_suffix_is_loaded_from_its_resolved_path(processor, vst_loads, vst_dir):
+    path = os.path.join(vst_dir, "Plugin.VST3")
+    open(path, "wb").close()
+    processor.update_settings(_vst_settings(path))
+    assert processor.vst_failed is False
+    assert processor.vst_plugin is not None
+    assert vst_loads == [os.path.realpath(path)]

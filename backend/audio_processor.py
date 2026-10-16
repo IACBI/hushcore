@@ -1,6 +1,7 @@
 import ctypes
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -10,6 +11,7 @@ import scipy.ndimage as ndi
 import scipy.signal as signal
 import sounddevice as sd
 
+import virtual_device
 from config import DEFAULT_SETTINGS
 
 try:
@@ -51,6 +53,47 @@ def _fit_length(y, reference):
     if y.shape[0] >= n:
         return y[:n]
     return np.concatenate((y, reference[y.shape[0]:]))
+
+
+def _resolve_vst_path(path):
+    """Resolved path of a VST3 plugin, or ValueError. Loading a plugin runs native code, so only real .vst3 files are accepted (and .vst3 bundles on macOS)."""
+    if not path or not os.path.isabs(path):
+        raise ValueError("the path must be absolute")
+    resolved = os.path.realpath(path)
+    if not resolved.lower().endswith(".vst3"):
+        raise ValueError("the file must have a .vst3 extension")
+    if os.path.isfile(resolved):
+        return resolved
+    if sys.platform == "darwin" and os.path.isdir(resolved):
+        return resolved
+    raise ValueError("no such .vst3 file (resolved to " + resolved + ")")
+
+
+def _usable_default_idx(devices, is_input):
+    idx = sd.default.device[0 if is_input else 1]
+    channels = "max_input_channels" if is_input else "max_output_channels"
+    if idx is None or not 0 <= idx < len(devices) or devices[idx][channels] <= 0:
+        return None
+    return idx
+
+
+def _auto_device_idx(devices, is_input):
+    """Device for an empty selection, or None to leave the choice to the generic lookup."""
+    if not is_input:
+        for idx, dev in enumerate(devices):
+            if dev["max_output_channels"] > 0 and virtual_device.is_sink(dev["name"]):
+                logger.info("Auto-selected HushCore Sink for default output: %s", dev["name"])
+                return idx
+        return _usable_default_idx(devices, is_input=False)
+
+    # The HushCore Microphone plays the engine's own output, so capturing it would feed back.
+    default = _usable_default_idx(devices, is_input=True)
+    if default is not None and not virtual_device.is_microphone(devices[default]["name"]):
+        return default
+    for idx, dev in enumerate(devices):
+        if dev["max_input_channels"] > 0 and not virtual_device.is_microphone(dev["name"]):
+            return idx
+    return None
 
 
 def _normalize(b, a):
@@ -630,11 +673,18 @@ class AudioProcessor:
 
         self.vst_plugin = None
         self.vst_failed = False
-        logger.info("Loading VST3 plugin: %s", vst_path)
+        try:
+            resolved = _resolve_vst_path(vst_path)
+        except ValueError as e:
+            logger.error("Rejected VST3 path %r: %s", vst_path, e)
+            self.vst_failed = True
+            return
+
+        logger.info("Loading VST3 plugin: %s", resolved)
         try:
             if VST3Plugin is None:
                 raise ImportError("pedalboard is not installed or VST3Plugin could not be imported.")
-            self.vst_plugin = VST3Plugin(vst_path)
+            self.vst_plugin = VST3Plugin(resolved)
             self._loaded_vst_path = vst_path
             logger.info("Loaded VST3 plugin: %s", self.vst_plugin.name)
         except Exception as e:
@@ -858,26 +908,23 @@ class AudioProcessor:
                     if not is_input and dev["max_output_channels"] > 0:
                         return idx
         else:
-            # If no device selected on startup, search for a Virtual Cable to avoid playing to speakers
-            if not is_input:
-                for idx, dev in enumerate(devices):
-                    api_name = hostapis[dev["hostapi"]]["name"]
-                    dev_name_lower = dev["name"].lower()
-                    if ("cable" in dev_name_lower or "virtual" in dev_name_lower or "vb-audio" in dev_name_lower) and dev["max_output_channels"] > 0:
-                        logger.info("Auto-selected Virtual Cable for default output: %s [%s]", dev["name"], api_name)
-                        return idx
+            idx = _auto_device_idx(devices, is_input)
+            if idx is not None:
+                return idx
 
         # 3. Fallback: Find the default WASAPI device
         for idx, dev in enumerate(devices):
             api_name = hostapis[dev["hostapi"]]["name"]
             if "wasapi" in api_name.lower():
-                if is_input and dev["max_input_channels"] > 0:
+                if is_input and dev["max_input_channels"] > 0 and not virtual_device.is_microphone(dev["name"]):
                     return idx
                 if not is_input and dev["max_output_channels"] > 0:
                     return idx
 
         # 4. Final Fallback
         default = sd.default.device[0] if is_input else sd.default.device[1]
+        if is_input and default is not None and 0 <= default < len(devices) and virtual_device.is_microphone(devices[default]["name"]):
+            raise RuntimeError("No input device other than HushCore Microphone is available")
         return default
 
     def _negotiate_sample_rate(self, input_idx, output_idx, monitor_idx, monitor_enabled):

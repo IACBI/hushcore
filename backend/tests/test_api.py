@@ -1,8 +1,10 @@
+import contextlib
 import importlib
 import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import threading
@@ -21,8 +23,8 @@ STATUS_KEYS = {
     "df_available", "vst_loaded", "vst_failed", "sample_rate",
     "latency_ms", "cpu_load", "clipping",
 }
-# The WebSocket frame adds the active engine name and its xrun count to the engine's status.
-WS_KEYS = STATUS_KEYS | {"engine", "xruns", "engine_mode", "engine_notice"}
+# The WebSocket frame adds the active engine name, its xrun count and the reconnect state to the engine's status.
+WS_KEYS = STATUS_KEYS | {"engine", "xruns", "engine_mode", "engine_notice", "reconnecting", "reconnect_reason"}
 
 FAKE_ENGINE = os.path.join(BACKEND_DIR, "tests", "fake_engine.py")
 
@@ -483,3 +485,142 @@ def test_native_exclusive_fallback_is_reported_on_websocket(native_api, api, app
     assert metrics["engine_mode"] == "shared"
     assert "using shared mode" in metrics["engine_notice"]
     assert api.post("/api/stop").status_code == 200
+
+
+def test_virtual_device_endpoint_requires_key(app_env):
+    anon = TestClient(app_env.app)
+    assert anon.get("/api/virtual-device").status_code == 401
+
+
+def test_virtual_device_python_source_reports_installed_from_device_list(api, app_env, monkeypatch):
+    listing = {
+        "inputs": [{"name": "Mic [MME]"}, {"name": "HushCore Microphone [Windows WASAPI]"}],
+        "outputs": [{"name": "Speakers [MME]"}, {"name": "HushCore Sink [Windows WASAPI]"}],
+    }
+    monkeypatch.setattr(app_env.processor, "get_devices", lambda: listing)
+
+    body = api.get("/api/virtual-device").json()
+    assert body["installed"] is True
+    assert body["provider"] == body["platform"]
+    assert body["sink"] == "HushCore Sink [Windows WASAPI]"
+    assert body["microphone"] == "HushCore Microphone [Windows WASAPI]"
+    assert set(body) == {
+        "installed", "provider", "sink", "microphone", "detail", "platform", "install_command", "uninstall_command",
+    }
+
+    devices = api.get("/api/devices").json()
+    assert devices["inputs"] == listing["inputs"]
+    assert devices["virtual_device"] == body
+
+
+def test_virtual_device_missing_reports_none_and_install_command(api, app_env, monkeypatch):
+    monkeypatch.setattr(app_env.processor, "get_devices", lambda: {"inputs": [{"name": "Mic"}], "outputs": [{"name": "Speakers"}]})
+    body = api.get("/api/virtual-device").json()
+    assert body["installed"] is False
+    assert body["provider"] == "none"
+    assert body["sink"] is None and body["microphone"] is None
+    assert body["platform"] == app_env.virtual_device.platform_name()
+    assert "install" in body["install_command"]
+    assert "uninstall" in body["uninstall_command"]
+
+
+def test_virtual_device_native_source_is_the_engine_report(native_api, api, app_env, monkeypatch):
+    monkeypatch.setenv("HUSHCORE_FAKE_VIRTUAL", "1")
+    assert api.post("/api/engine", json={"engine": "native"}).json()["active"] == "native"
+    assert api.post("/api/start").status_code == 200
+    try:
+        body = api.get("/api/virtual-device").json()
+    finally:
+        api.post("/api/stop")
+    # The fake engine reports provider "windows-driver"; the Python fallback would say the platform name.
+    assert body["installed"] is True
+    assert body["provider"] == "windows-driver"
+    assert body["sink"] == "HushCore Sink (fake)"
+    assert body["microphone"] == "HushCore Microphone (fake)"
+
+
+def test_reconnecting_fields_reach_the_websocket_frame(api, app_env):
+    assert api.post("/api/start").status_code == 200
+    with api.websocket_connect("/ws") as ws:
+        ws.send_text(_auth_message(app_env.API_KEY))
+        assert json.loads(ws.receive_text()) == {"action": "auth_ok"}
+        metrics = json.loads(ws.receive_text())
+    assert set(metrics) == WS_KEYS
+    assert metrics["reconnecting"] is False
+    assert metrics["reconnect_reason"] is None
+
+
+@pytest.mark.parametrize(("platform", "exe_name"), [
+    ("win32", "hushcore-engine.exe"),
+    ("linux", "hushcore-engine"),
+    ("darwin", "hushcore-engine"),
+])
+def test_native_binary_name_follows_the_platform(app_env, tmp_path, monkeypatch, platform, exe_name):
+    monkeypatch.setattr(sys, "platform", platform)
+    assert app_env._native_exe_name() == exe_name
+    assert all(os.path.basename(path) == exe_name for path in app_env._native_candidates())
+
+    binary = tmp_path / exe_name
+    binary.write_bytes(b"")
+    monkeypatch.setattr(app_env, "_native_candidates", lambda: (str(binary),))
+    assert app_env._native_command() == [str(binary)]
+
+
+SECURITY_HEADER_VALUES = {
+    "x-content-type-options": "nosniff",
+    "cross-origin-resource-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+}
+
+
+def test_security_headers_are_sent_on_api_and_auth_errors(app_env):
+    anon = TestClient(app_env.app)
+    for resp in (anon.get("/api/health"), anon.get("/api/settings")):
+        for name, value in SECURITY_HEADER_VALUES.items():
+            assert resp.headers[name] == value
+
+
+def test_index_has_csp_with_a_nonce_for_the_injected_key_script(app_env, tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    monkeypatch.setattr(app_env, "static_path", str(tmp_path))
+    resp = TestClient(app_env.app).get("/")
+    csp = resp.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "connect-src 'self' ws://127.0.0.1:* ws://localhost:*" in csp
+    assert "object-src 'none'" in csp
+    nonce = re.search(r"script-src 'self' 'nonce-([A-Za-z0-9_-]+)'", csp).group(1)
+    assert f'<script nonce="{nonce}">window.HUSHCORE_API_KEY' in resp.text
+
+
+def test_built_dashboard_loads_under_the_csp(app_env):
+    if not os.path.exists(os.path.join(app_env.static_path, "index.html")):
+        pytest.skip("dashboard not built (run npm run build in frontend)")
+    client = TestClient(app_env.app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    csp = resp.headers["content-security-policy"]
+    nonce = re.search(r"'nonce-([A-Za-z0-9_-]+)'", csp).group(1)
+
+    # Every inline script in the page must carry the nonce; external scripts come from 'self'.
+    for tag in re.findall(r"<script\b[^>]*>", resp.text):
+        if " src=" not in tag:
+            assert f'nonce="{nonce}"' in tag, tag
+
+    assets = re.findall(r'(?:src|href)="(/assets/[^"]+)"', resp.text)
+    assert any(a.endswith(".js") for a in assets)
+    assert any(a.endswith(".css") for a in assets)
+    for path in assets:
+        asset = client.get(path)
+        assert asset.status_code == 200, path
+        assert asset.headers["x-content-type-options"] == "nosniff"
+
+
+def test_unauthenticated_websockets_are_capped_with_1013(app_env):
+    client = TestClient(app_env.app)
+    with contextlib.ExitStack() as held:
+        for _ in range(app_env.WS_UNAUTHENTICATED_LIMIT):
+            held.enter_context(client.websocket_connect("/ws"))
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_text()
+        assert excinfo.value.code == 1013

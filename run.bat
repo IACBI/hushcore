@@ -56,9 +56,9 @@ where node >nul 2>nul
 if errorlevel 1 goto no_node
 where npm >nul 2>nul
 if errorlevel 1 goto no_node
-for /f "tokens=1 delims=." %%V in ('node -p "process.versions.node"') do set "NODE_MAJOR=%%V"
-if not defined NODE_MAJOR goto no_node
-if %NODE_MAJOR% LSS 20 goto no_node
+rem The locked Vite supports Node 20.19 or later in the 20 line, or 22.12 and newer; Node 21 and 22.0-22.11 are not supported.
+node -e "const [a,b]=process.versions.node.split('.').map(Number);process.exit((a===20&&b>=19)||(a===22&&b>=12)||a>22?0:1)" >nul 2>nul
+if errorlevel 1 goto no_node
 
 pushd frontend
 if exist "node_modules\" goto npm_ready
@@ -198,7 +198,7 @@ echo [ERROR] The frontend folder was not found in %CD%.
 goto fail_pause
 
 :no_node
-echo [ERROR] Node.js 20.19 or newer is required to build the dashboard.
+echo [ERROR] Node.js 20.19+ or 22.12+ is required to build the dashboard.
 echo Install it from https://nodejs.org/ (it is only needed to build the dashboard).
 goto fail_pause
 

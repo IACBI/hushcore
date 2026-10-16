@@ -1,0 +1,7 @@
+# HushCore virtual microphone for PulseAudio.
+#
+# A null sink (HushCore Sink) that the engine writes to, and a remapped source (HushCore Microphone)
+# that reads its monitor. Installed by scripts/linux/install-virtual-mic.sh as
+# ${XDG_CONFIG_HOME:-~/.config}/pulse/hushcore-virtual-mic.pa and included from default.pa.
+load-module module-null-sink sink_name=hushcore_sink sink_properties="device.description=\"HushCore Sink\""
+load-module module-remap-source source_name=hushcore_mic master=hushcore_sink.monitor source_properties="device.description=\"HushCore Microphone\""

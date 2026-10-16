@@ -45,3 +45,7 @@ Desktop.ini
 # Rust engine build output
 engine/target/
 backend/bin/
+
+# Virtual-device build output and staged packages (scripts/*/build-*.{ps1,sh})
+/build/
+/dist/
