@@ -1,6 +1,6 @@
 {
   "name": "hushcore-frontend",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Dashboard for the HushCore local microphone processor, built with Vite into the FastAPI backend's static directory.",
   "private": true,
   "type": "module",

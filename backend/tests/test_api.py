@@ -133,7 +133,7 @@ def test_health_is_public(app_env):
     anon = TestClient(app_env.app)
     resp = anon.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "version": "0.0.1"}
+    assert resp.json() == {"status": "ok", "version": "0.0.2"}
 
 
 def test_api_path_does_not_fall_through_to_index(api):

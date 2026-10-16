@@ -1,6 +1,6 @@
 [package]
 name = "hushcore-engine"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Native low-latency audio engine for HushCore"
 license = "MIT"

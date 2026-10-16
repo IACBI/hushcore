@@ -30,7 +30,7 @@ from presets import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("hushcore")
 
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 PUBLIC_API_PATHS = frozenset({"/api/health"})
 
 def _resolve_port():

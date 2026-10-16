@@ -37,7 +37,7 @@ Everything runs on your machine. Audio is processed frame by frame on the CPU an
 - Python 3.10 or newer, on `PATH`.
 - Node.js 20.19 or newer, only to build the dashboard. If `backend\static\index.html` already exists, the build is skipped and Node is not needed.
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) to pass the processed audio to other apps.
-- Optional, for the native engine: [Rust](https://rustup.rs/) (stable). Without it HushCore uses the Python engine.
+- Optional, for the native engine: [Rust](https://rustup.rs/) (stable). Without it HushCore uses the Python engine. Alternatively, download `hushcore-engine-*-windows-x64.zip` from the latest release and put `hushcore-engine.exe` in `backendin`.
 - Optional, for HQ AI: PyTorch and DeepFilterNet, which is a large download. HQ AI runs only at 48 kHz; at other sample rates it uses Eco DSP.
 
 ### Installation
@@ -157,7 +157,7 @@ Her şey kendi bilgisayarınızda çalışır. Ses kare kare CPU üzerinde işle
 - Python 3.10 veya daha yeni, `PATH` içinde.
 - Node.js 20.19 veya daha yeni; yalnızca paneli derlemek için gerekir. `backend\static\index.html` zaten varsa derleme atlanır ve Node gerekmez.
 - İşlenmiş sesi diğer uygulamalara aktarmak için [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
-- İsteğe bağlı, yerel motor için: [Rust](https://rustup.rs/) (stable). Rust yoksa HushCore Python motorunu kullanır.
+- İsteğe bağlı, yerel motor için: [Rust](https://rustup.rs/) (stable). Rust yoksa HushCore Python motorunu kullanır. Ya da son sürümden `hushcore-engine-*-windows-x64.zip` dosyasını indirip `hushcore-engine.exe` dosyasını `backendin` içine koyun.
 - İsteğe bağlı HQ AI için PyTorch ve DeepFilterNet; büyük bir indirmedir. HQ AI yalnızca 48 kHz'de çalışır, diğer örnekleme hızlarında Eco DSP kullanılır.
 
 ### Kurulum
