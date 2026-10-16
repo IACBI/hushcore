@@ -147,8 +147,13 @@ jobs:
         shell: pwsh
         run: |
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\build\*\WindowsDriver.common.targets" | ForEach-Object {
-            Select-String -Path $_.FullName -Pattern 'InfVerif' | Select-Object -First 30 | ForEach-Object { $_.ToString() }
+            $lines = Get-Content $_.FullName
+            foreach ($range in @(@(560, 600), @(640, 725))) {
+              for ($i = $range[0]; $i -le $range[1] -and $i -le $lines.Count; $i++) { '{0,5}: {1}' -f $i, $lines[$i - 1] }
+            }
           }
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10" -Recurse -Filter InfVerif.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName }
 
       - name: InfVerif
         shell: pwsh
