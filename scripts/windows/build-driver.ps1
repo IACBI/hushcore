@@ -31,7 +31,8 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $project = Join-Path $repoRoot 'driver\windows\HushCoreAudio.vcxproj'
-$buildOutput = Join-Path $repoRoot ('build\driver\windows\{0}\{1}' -f $Platform, $Configuration)
+# The WDK assembles the signed package (sys, inf, cat) in a subfolder named after the project.
+$buildOutput = Join-Path $repoRoot ('build\driver\windows\{0}\{1}\HushCoreAudio' -f $Platform, $Configuration)
 $distDir = Join-Path $repoRoot ('dist\driver\windows\{0}' -f $Platform)
 $packageFiles = @('HushCoreAudio.sys', 'HushCoreAudio.inf', 'HushCoreAudio.cat')
 
