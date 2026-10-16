@@ -10,6 +10,11 @@ required:
 Only the bundle lives here. The engine's device I/O is in `engine/src/audio/coreaudio/`, and the
 install and build wrappers are in `scripts/macos/`.
 
+## Status
+
+The plug-in is built, installed and tested on the `macos-14` runner in CI (see
+"Verification status" at the end). It has not been run on a physical Mac.
+
 ## Design
 
 **Objects.** The plug-in object, two devices (`HushCore Sink`, `HushCore Microphone`) and one
@@ -47,7 +52,7 @@ silence. The ring is cleared when the first device starts. The IO path does not 
 or log.
 
 **Latency.** The microphone's input sample time lags the sink's output sample time by about two
-IO buffers (the sink writes ahead, the microphone reads what has been written). Expect roughly
+IO buffers (the sink writes ahead, the microphone reads what has been written). This is a design estimate, not a measurement: about
 1024 frames (about 21 ms at 48 kHz) at a 512-frame IO size. The safety offset is kept small to
 keep this down. The trade-off is that the ring is written in place with no extra jitter buffer:
 a stalled engine produces silence on the microphone rather than stale audio.
@@ -88,6 +93,9 @@ coreaudiod`), and waits up to 20 seconds for both device names to appear in
 `system_profiler SPAudioDataType`. Both scripts re-run themselves under `sudo` when started
 without root. Both are idempotent.
 
+The release archive `hushcore-plugin-<tag>-macos-adhoc.zip` keeps the repository layout. Extract
+it and run the same commands from the extracted folder.
+
 ## Test
 
 `tests/loopback_test.c` finds both devices by UID through
@@ -107,7 +115,8 @@ without root. Both are idempotent.
 Recording from a microphone device can be blocked by the TCC microphone permission. A process
 that has no permission receives silence, and the full check reports "recorded silence". In that
 case use `--delivery-only` to confirm the driver path, and grant the permission to the terminal
-or CI agent for the full signal check.
+or CI agent for the full signal check. In CI the full check runs first; if it fails, the job emits a
+warning and runs `--delivery-only`.
 
 ## Developer ID signing and notarization
 
@@ -136,8 +145,20 @@ are not stored in this repository.
 - The loopback reports silence at the start of a run: the first about 0.1 s is silent while the
   ring fills. Latency is only reported after the click is found.
 
-## Not verified here
+## Verification status
 
-This code was written on a Windows machine with no macOS SDK, so it has not been compiled or
-run. CI (macOS 14 runner) is the first real build. Items that depend on the SDK headers and
-that were checked only against memory are listed in the implementation report, not here.
+Checked in CI on the `macos-14` runner (`macos-plugin` job in `.github/workflows/ci.yml`):
+
+- the bundle compiles for arm64 and x86_64 with `-Werror` and passes `codesign --verify --strict`;
+- `sudo scripts/macos/install-plugin.sh` installs it, `coreaudiod` loads it, and both devices appear;
+- the loopback test runs. If the runner lacks microphone permission, the job warns and checks buffer
+  delivery only (`--delivery-only`);
+- `uninstall-plugin.sh` removes the bundle again.
+
+Not verified:
+
+- physical Macs of any kind (Apple silicon or Intel), and macOS versions other than the runner's;
+- a real microphone, and real apps (Discord, OBS, Zoom, QuickTime) recording from HushCore Microphone;
+- sleep, wake and device changes, and long-running stability;
+- Developer ID signing and notarization. The release bundle is ad-hoc signed (see
+  [docs/SIGNING.md](../../docs/SIGNING.md)).

@@ -43,15 +43,15 @@ Engine diagnostics, all with output muted where audio runs:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform x64
-# package in dist\driver\windows\x64\ (test-signed)
+# package in dist\driver\windows\x64\ (test-signed); use -Platform ARM64 for dist\driver\windows\ARM64\
 ```
 
 Loading a test-signed driver needs test signing on a development machine or VM. That is a boot
 setting you change yourself (`bcdedit /set testsigning on`, reboot); the scripts never change it.
-Then, as administrator:
+Then, as administrator. The package is test-signed, so the installer needs `-AllowTestSigned`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1 -AllowTestSigned
 powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall-driver.ps1
 ```
 
@@ -65,7 +65,7 @@ Release signing: [SIGNING.md](SIGNING.md).
 ```bash
 bash scripts/macos/build-plugin.sh          # dist/driver/macos/HushCoreAudio.driver, ad-hoc signed
 sudo bash scripts/macos/install-plugin.sh   # copies to /Library/Audio/Plug-Ins/HAL, restarts coreaudiod
-make -C driver/macos test                   # tone through HushCore Sink, read back from HushCore Microphone
+make -C driver/macos test                   # tone through HushCore Sink, read back from HushCore Microphone (plug-in must be installed)
 sudo bash scripts/macos/uninstall-plugin.sh
 ```
 
@@ -104,8 +104,35 @@ bash tools/linux-docker/run.sh
 | `frontend` | ubuntu | dashboard builds |
 | `engine` | windows, macos-14, ubuntu-24.04 | build, tests, clippy `-D warnings`, chain benchmark |
 | `linux-e2e` | ubuntu-24.04 + Docker | audio reaches HushCore Microphone; reconnect; cleanup |
-| `windows-driver` | windows-2022 | driver builds for x64 and ARM64, InfVerif passes |
-| `macos-plugin` | macos-14 | plug-in builds, installs into coreaudiod, loops audio back, uninstalls |
+| `windows-driver` | windows-2022 | driver builds for x64 and ARM64 (test-signed), InfVerif passes on both |
+| `macos-plugin` | macos-14 | plug-in builds, installs into coreaudiod, runs the loopback test (buffer-delivery check only if the runner has no microphone permission), uninstalls |
 
 Hardware-only checks (a real unplug, sleep/resume, a test-signed driver on a VM) are listed in
-[VIRTUAL_DEVICE.md](VIRTUAL_DEVICE.md#manual-release-checks).
+[VIRTUAL_DEVICE.md](VIRTUAL_DEVICE.md#manual-release-checks). What CI does not prove is listed in the
+driver READMEs: [Windows](../driver/windows/README.md#not-verified), [macOS](../driver/macos/README.md#verification-status),
+[Linux](../driver/linux/README.md#verified-and-not-verified).
+
+## Release
+
+Pushing a tag `v*` starts `.github/workflows/release.yml`. It builds the engine for Windows, macOS
+(universal) and Linux, the Windows driver (x64 and ARM64), the macOS plug-in and the Linux
+virtual-microphone files, then creates a **draft** GitHub release with them. The tag must match the
+version in `engine/Cargo.toml`. Starting the workflow by hand (`workflow_dispatch`) runs the same builds
+and keeps the files as the `release-dry-run` artifact without publishing anything.
+
+Assets, for a tag such as `v0.0.99`:
+
+| Asset | Contents |
+| --- | --- |
+| `hushcore-engine-v0.0.99-windows-x64.zip` | `hushcore-engine.exe` |
+| `hushcore-engine-v0.0.99-macos-universal.zip` | `hushcore-engine` (arm64 and x86_64) |
+| `hushcore-engine-v0.0.99-linux-x64.zip` | `hushcore-engine` |
+| `hushcore-driver-v0.0.99-windows-testsigned.zip` | `scripts\windows\install-driver.ps1`, `uninstall-driver.ps1`, `dist\driver\windows\` (x64 and ARM64) |
+| `hushcore-plugin-v0.0.99-macos-adhoc.zip` | `scripts/macos/install-plugin.sh`, `uninstall-plugin.sh`, `dist/driver/macos/` |
+| `hushcore-virtual-mic-v0.0.99-linux.zip` | `driver/linux/`, `scripts/linux/` |
+| `SHA256SUMS` | SHA-256 of every archive |
+
+The virtual-device archives keep the repository layout, because the scripts find their files two
+levels up from their own location. Extract an archive and run the script from the extracted folder.
+Install steps are in [VIRTUAL_DEVICE.md](VIRTUAL_DEVICE.md#installing-from-a-release). Signing state of
+each asset is in [SIGNING.md](SIGNING.md#current-release-state).

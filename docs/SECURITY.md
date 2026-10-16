@@ -16,8 +16,11 @@ the results of the review done for the cross-platform release.
 | VST3 plug-ins | user, in the backend process | native code chosen by the user | only an absolute path to an existing `.vst3` file (bundle directory on macOS); resolved path logged; failing plug-ins are bypassed |
 | Install scripts | administrator / root | run once by the user | Windows: SHA256 manifest from the build checked before `pnputil`, catalog signature checked, test-signed packages need `-AllowTestSigned`; macOS: refuses writable or foreign-owned bundles, copies into a root-owned staging folder, `codesign --verify --deep --strict` before the bundle goes live; uninstallers are idempotent and locale-independent |
 
-Nothing in HushCore sends audio or telemetry anywhere. No credential, key or certificate is stored
-in the repository; release signing (see [SIGNING.md](SIGNING.md)) reads them from CI secrets.
+HushCore sends no audio or telemetry anywhere. The one outbound connection the dashboard makes is to
+Google Fonts (`fonts.googleapis.com` and `fonts.gstatic.com`, allowed by the CSP and requested by the
+browser when the page loads). The backend itself only contacts `127.0.0.1`. No credential, key or
+certificate is stored in the repository; release signing (see [SIGNING.md](SIGNING.md)) reads them from
+CI secrets.
 
 ## Review results
 

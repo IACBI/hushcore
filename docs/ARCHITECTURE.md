@@ -29,7 +29,7 @@ Every platform backend exports the same surface, consumed only by `engine/src/ma
 ```rust
 pub struct PlatformInit;                 // per-thread runtime init (COM on Windows, no-op elsewhere)
 pub fn list_devices() -> Result<DeviceList>;
-pub fn virtual_device() -> VirtualDeviceStatus;
+pub fn virtual_device(devices: &DeviceList) -> VirtualDeviceStatus;
 pub fn probe() -> Result<Vec<String>>;
 pub struct Session;                      // start / set_monitor / diagnostics / stop
 ```

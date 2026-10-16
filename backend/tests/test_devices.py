@@ -153,7 +153,7 @@ def test_status_from_engine_reply_keeps_the_engine_provider():
 @pytest.mark.parametrize(("platform", "name", "install", "uninstall"), [
     (
         "win32", "windows",
-        r"powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1",
+        r"powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1 -AllowTestSigned",
         r"powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall-driver.ps1",
     ),
     ("darwin", "macos", "sudo scripts/macos/install-plugin.sh", "sudo scripts/macos/uninstall-plugin.sh"),

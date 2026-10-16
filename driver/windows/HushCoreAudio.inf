@@ -1,7 +1,7 @@
 ; HushCoreAudio.inf
 ; HushCore Virtual Audio: a PortCls WaveRT audio driver, root-enumerated.
 ; Endpoints: "HushCore Sink" (render, written by the engine) and "HushCore Microphone" (capture).
-; DriverVer is stamped at build time by the WDK StampInf step (see README.md).
+; The DriverVer line below is a placeholder; the WDK StampInf step rewrites it at build time.
 
 [Version]
 Signature="$WINDOWS NT$"

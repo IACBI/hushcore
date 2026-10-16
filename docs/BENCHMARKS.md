@@ -34,6 +34,18 @@ The running estimate is capture period + render period + ring fill + the DSP cha
 (255 samples, 5.3 ms at 48 kHz, for the noise suppressor's STFT); the start-up figure in `started` leaves out the
 look-ahead. The virtual device adds its own period on top (about 10 ms on Windows).
 
+## Engine comparison (measured for v0.0.2)
+
+Same Windows PC (Realtek, shared mode limited to 10 ms by the driver), from the v0.0.2 release
+notes. These are the engine's own latency estimates at the time, before the ring-fill change
+described above:
+
+| Engine / mode | Latency | xruns |
+| --- | --- | --- |
+| Python engine | 54 ms | - |
+| Native, shared | 35 ms | 0 |
+| Native, exclusive | 17 ms | 0 |
+
 ## End-to-end engine (Linux, Docker)
 
 `bash tools/linux-docker/run.sh`: headless PipeWire with pipewire-pulse (Ubuntu 24.04 packages), a

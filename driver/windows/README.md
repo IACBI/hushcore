@@ -4,16 +4,16 @@ A PortCls WaveRT audio driver that gives HushCore its own virtual microphone, so
 virtual audio software is needed. The engine writes to **HushCore Sink** (render) and applications read from
 **HushCore Microphone** (capture). The driver copies frames between the two.
 
-Status: the code is written but **not compiled locally** (the WDK is not installed on the
-development machine). It is compiled and InfVerif-checked by CI on `windows-2022`. See
-"Not verified" below.
+Status: the driver builds in CI for **x64 and ARM64** (Release, test-signed), and `infverif` passes on
+both packages (`windows-driver` job in `.github/workflows/ci.yml`). It has **not been loaded on a real
+Windows machine**, so the audio path through it is unverified. See "Not verified" below.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `src/Adapter.cpp` | `DriverEntry`, `AddDevice`, `StartDevice`; creates the shared adapter, the four subdevices and the two physical connections |
-| `src/Common.h` | Constants (fixed format, ring size), pool helpers, `HushRing` and `HushAdapter` declarations |
+| `src/Common.h` | Constants (fixed format, ring size, buffer cap), pool helpers, `HushRing` and `HushAdapter` declarations |
 | `src/Ring.cpp` | Loopback ring (non-paged, spin-locked) and the shared adapter's `IUnknown` |
 | `src/Endpoints.h` | Declarations for `HushStream`, `HushWaveMiniport`, `HushTopologyMiniport` |
 | `src/Stream.cpp` | WaveRT stream: position, high-resolution timer, buffer and notification handling |
@@ -31,9 +31,10 @@ Install, uninstall and build scripts are in `scripts/windows/`.
 ```
 
 - **Subdevices.** `WaveRender`, `TopologyRender`, `WaveCapture`, `TopologyCapture`, registered in
-  `StartDevice`. Each filter has two pins. Render: wave host IN (0) and bridge OUT (1) connect to
-  topology bridge IN (0) and speaker OUT (1). Capture is the mirror image. The physical connections
-  join the bridge pins: wave 1 → topology 0 for render, topology 1 ↔ wave 1 for capture.
+  `StartDevice`. Each filter has two pins, and the pins are joined through bridge pins.
+  Render: wave host IN (0) and bridge OUT (1) connect to topology bridge IN (0) and speaker OUT (1).
+  Capture is the mirror image. The physical connections join the bridge pins: wave 1 → topology 0 for
+  render, topology 1 ↔ wave 1 for capture.
 - **Endpoint names.** The outermost topology pin carries a `Name` GUID: the speaker OUT pin on render,
   the microphone IN pin on capture. The INF maps those GUIDs under
   `HKLM\SYSTEM\CurrentControlSet\Control\MediaCategories` to "HushCore Sink" and
@@ -69,6 +70,8 @@ Install, uninstall and build scripts are in `scripts/windows/`.
 - **No IOCTLs, no device interfaces, no user buffers.** The only interfaces are the KS categories
   `KSCATEGORY_AUDIO`, `_RENDER`, `_CAPTURE`, `_REALTIME` and `_TOPOLOGY`. There are no KS property
   handlers; no volume or mute nodes.
+- **Driver settings.** `PnpLockdown=1` in the INF. The project builds with `/kernel`, `SDLCheck`,
+  `WarningLevel Level4` and `TreatWarningAsError`.
 
 ## Build
 
@@ -78,19 +81,28 @@ Requirements: Visual Studio 2022 with the Windows Driver Kit extension (WDK 10.0
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Configuration Release -Platform x64
 ```
 
-Equivalent raw command (CI uses this):
+`-Platform` accepts `x64` (default) and `ARM64`. The script runs MSBuild on the project; the raw
+command is:
 
 ```bat
 msbuild driver\windows\HushCoreAudio.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
 Outputs:
-- MSBuild writes to `build\driver\windows\<Platform>\<Configuration>\`.
+- MSBuild writes the WDK package to `build\driver\windows\<Platform>\<Configuration>\HushCoreAudio\`.
 - `build-driver.ps1` copies `HushCoreAudio.sys`, `.inf` and `.cat` to `dist\driver\windows\<Platform>\`,
   prints their SHA-256 hashes, and writes the manifest `HushCoreAudio.sha256` beside them. The manifest
   has one line per file, in the form `<SHA256>  <file name>`.
 
-`build\` and `dist\` must be git-ignored. The root `.gitignore` is not owned by this change.
+Project settings that matter for packaging:
+- `SkipPackageVerification=true`. The WDK's build-time package verifier cannot load `InfVerif.dll` on
+  hosted runners, so CI runs `infverif.exe /w /u` on the staged `.inf` for both platforms instead.
+- inf2cat target OS list: `10_X64` for x64, `10_RS3_ARM64` for ARM64 (Windows 10 on ARM64 starts at 1709).
+- `ApiValidator` is disabled for ARM64 only: its analyzer is an x86 tool that cannot load ARM64
+  binaries on x64 build hosts. The x64 build validates the same source.
+- `FilesToPackage` includes the built `.sys`; the WDK assembles the `.inf` and `.cat`.
+
+`build\` and `dist\` are git-ignored by the root `.gitignore`.
 
 ## Test-signing workflow (developer VM)
 
@@ -102,11 +114,12 @@ Only run these yourself, from an elevated shell. The scripts never change boot s
    The installer checks the package first (see "Package integrity" below), warns if test signing is
    off, and prints the command above. Exit codes are listed in the script header.
 3. Verify (see below).
-4. Uninstall: `scripts\windows\uninstall-driver.ps1` (elevated). It is idempotent.
+4. Uninstall: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\uninstall-driver.ps1`
+   from an elevated shell. It is idempotent.
 5. Optional, to restore: `bcdedit /set testsigning off`, then reboot.
 
-The CI runner must have a code-signing certificate that the WDK TestSign mode can use. This is set
-up in the CI steps below.
+Packages from `build-driver.ps1` and from the release archive are test-signed, so `-AllowTestSigned` is
+required until attestation signing is done (see [docs/SIGNING.md](../../docs/SIGNING.md)).
 
 ### Package integrity
 
@@ -147,76 +160,40 @@ the signature check then fails unless that signer is trusted on the machine.
   `WriteOffset`. The audio engine must accept that (see Not verified).
 - Latency is roughly the ring fill, 20 ms in steady state, plus the engine's own buffering.
   `GetHWLatency` reports zero because there is no hardware FIFO.
-- `DriverVer` in the INF is a literal (`01/01/2026,0.0.2.0`). The build stamps it through the WDK
-  StampInf step, which is expected but not verified. If the built `.inf` still shows the literal, the
-  version is not stamped and the installer's `pnputil` still works.
+- `DriverVer` in the INF is `10/16/2026,0.0.99.0`. If the WDK StampInf step rewrites it during the
+  build, the packaged value is the one `pnputil` reads; that behaviour is not checked.
 - The uninstaller finds driver packages through `Get-WindowsDriver`, which does not depend on the
   display language. The installer and uninstaller print `pnputil` output as-is and do not parse it.
 - Endpoint names are fixed at build time. Changing them needs a new INF and a reinstall.
 
 ## Not verified
 
-Nothing in this driver has been compiled or loaded. The following are unverified, by item:
+The code compiles and passes `infverif` in CI (x64 and ARM64). Nothing else has been checked:
 
-- **PortCls interface shapes.** `IMiniportWaveRT::Init`, `NewStream`, `GetDeviceDescription`,
-  `IMiniportWaveRTStreamNotification` (`AllocateBufferWithNotification(NotificationCount, RequestedSize, ...)`,
-  `FreeBufferWithNotification`, `RegisterNotificationEvent`, `UnregisterNotificationEvent`) and the
-  `IMiniportWaveRTStream` method list (`SetFormat`, `SetState`, `GetPosition(KSAUDIO_POSITION*)`,
-  `AllocateAudioBuffer`, `FreeAudioBuffer`, `GetHWLatency`, `GetPositionRegister`, `GetClockRegister`)
-  were written from memory of the WDK `portcls.h`. Any missing pure virtual or parameter mismatch shows
-  up as a compile error in `src/Stream.cpp` and `src/Endpoints.h`. Check the installed `portcls.h` first.
-- **`ExDeleteTimer`.** Called with three arguments (`timer, TRUE, TRUE`). Check whether the WDK
-  declares a fourth parameter.
-- **`ExAllocateTimer` / `ExSetTimer`.** Used as `(callback, context, EX_TIMER_HIGH_RESOLUTION)` and
-  `(timer, dueTime, period, nullptr)`.
-- **`MmAllocatePagesForMdl`, `MmMapLockedPagesSpecifyCache`, `MmFreePagesFromMdl`, and
-  `ExFreePool(mdl)`.** The MDL free pattern follows the public samples.
-- **Static GUID macros.** `STATIC_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`, `STATIC_KSCATEGORY_REALTIME`,
-  `STATIC_KSINTERFACE_STANDARD_LOOPED_STREAMING`, `STATIC_KSMEDIUM_STANDARD_DEVIO`,
-  `STATIC_KSDATAFORMAT_SUBTYPE_ANALOG` and `STATIC_KSDATAFORMAT_SPECIFIER_NONE` are assumed to exist.
-- **`WAVEFORMATEXTENSIBLE` visibility.** Assumed to come in through `ksmedia.h`.
-- **Topology physical connections.** The bridge pin indices (wave 1 and topology 0 for render,
-  topology 1 and wave 1 for capture) are assumed correct for `PcRegisterPhysicalConnection`.
-- **Sample-rate support.** Only 48 kHz is advertised. Windows shared-mode resampling is expected to
-  handle other app formats.
+- **Loading.** The package has not been installed or loaded on a Windows machine or VM. No device
+  has been created by the installer and no endpoint has been seen in Sound settings.
+- **Runtime behaviour.** The timer cadence, the notification contract, the engine's use of
+  `GetPosition` (wrapped byte offsets) and the lack of position/clock registers have not been tested.
 - **Endpoint naming.** The "HushCore Sink (HushCore Virtual Audio)" form depends on PortCls and
   MMDevices behaving as described.
-- **`PnpLockdown`, `Inf2Cat` property names, `DriverSign.SignMode`.** Set in the INF and vcxproj as
-  the WDK documents them; not checked against the installed WDK.
-- **InfVerif.** Not run. Needs `infverif /w` on CI.
-- **Runtime behavior.** The timer cadence, the notification contract, the audio engine's use of
-  `GetPosition` (wrapped byte offsets), and the lack of position/clock registers have not been tested.
-  Those need a test-signed VM.
+- **Topology connections.** The bridge pin indices (wave 1 and topology 0 for render, topology 1 and
+  wave 1 for capture) are unverified at runtime, though they compile.
+- **Sample rates.** Only 48 kHz is advertised. Windows shared-mode resampling is expected to handle
+  other app formats; this is not tested.
+- **Kernel tooling.** Driver Verifier, Static Driver Verifier and the WDK audio WHQL tests have not
+  been run (see [docs/SECURITY.md](../../docs/SECURITY.md)).
+- **Signing.** Test-signed only. Attestation signing is not done.
 
 ## CI steps (windows-2022)
 
-Run these in order on `windows-2022` (VS 2022 and WDK 10.0.26100 are preinstalled, or come from the
-WDK extension).
+The `windows-driver` job in `.github/workflows/ci.yml` does, in order:
 
-```powershell
-# 1. Test signing certificate for TestSign mode (used by the msbuild signing step).
-$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=WDKTestCert HushCore" `
-    -CertStoreLocation Cert:\LocalMachine\My -KeyUsage DigitalSignature -NotAfter (Get-Date).AddYears(2)
-Export-Certificate -Cert $cert -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" | Out-Null
-Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-Import-Certificate -FilePath "$env:RUNNER_TEMP\hushcore-test.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+1. Creates a self-signed code-signing certificate and trusts it for test signing.
+2. Runs `scripts\windows\build-driver.ps1 -Platform x64`, then `-Platform ARM64`.
+3. Runs `infverif.exe /w /u` on `dist\driver\windows\x64\HushCoreAudio.inf` and
+   `dist\driver\windows\ARM64\HushCoreAudio.inf` (the job fails on a non-zero exit).
+4. Uploads `dist\driver\windows\` as the `hushcore-driver-windows-testsigned` artifact.
 
-# 2. Build x64 and ARM64, Release.
-msbuild driver\windows\HushCoreAudio.vcxproj /p:Configuration=Release /p:Platform=x64
-msbuild driver\windows\HushCoreAudio.vcxproj /p:Configuration=Release /p:Platform=ARM64
-
-# 3. Stage the packages and write HushCoreAudio.sha256 (no elevation needed).
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform x64
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build-driver.ps1 -Platform ARM64
-
-# 4. InfVerif on both packages.
-$infverif = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Tools\*\x64\infverif.exe" | Sort-Object FullName | Select-Object -Last 1
-& $infverif.FullName /w /u "dist\driver\windows\x64\HushCoreAudio.inf"
-& $infverif.FullName /w /u "dist\driver\windows\ARM64\HushCoreAudio.inf"
-
-# 5. Static analysis (optional, recommended): run staticdv or the Code Analysis with the WDK rules
-#    on HushCoreAudio.vcxproj (EnableMicrosoftCodeAnalysis) before any release.
-```
-
-Expected: the builds produce `.sys`, `.inf` and `.cat`; `infverif` exits 0 for both. Installing and
-running on a VM remains manual (see Verify).
+The release workflow runs the same builds, then zips `scripts\windows\install-driver.ps1`,
+`scripts\windows\uninstall-driver.ps1` and `dist\driver\windows` into
+`hushcore-driver-<tag>-windows-testsigned.zip`, keeping the repository layout that the scripts expect.
