@@ -41,3 +41,7 @@ Desktop.ini
 *.log
 .system_generated/
 /scratch/
+
+# Rust engine build output
+engine/target/
+backend/bin/
