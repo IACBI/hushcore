@@ -1,0 +1,95 @@
+; HushCoreAudio.inf
+; HushCore Virtual Audio: a PortCls WaveRT audio driver, root-enumerated.
+; Endpoints: "HushCore Sink" (render, written by the engine) and "HushCore Microphone" (capture).
+; DriverVer is stamped at build time by the WDK StampInf step (see README.md).
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=MEDIA
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+DriverVer=01/01/2026,0.0.2.0
+CatalogFile=HushCoreAudio.cat
+PnpLockdown=1
+
+[Manufacturer]
+%MfgName%=HushCore,NTamd64,NTarm64
+
+[HushCore.NTamd64]
+%DeviceDesc%=HushCore_Install,ROOT\HushCoreVirtualAudio
+
+[HushCore.NTarm64]
+%DeviceDesc%=HushCore_Install,ROOT\HushCoreVirtualAudio
+
+[HushCore_Install.NT]
+CopyFiles=HushCore.CopyDriver
+AddReg=HushCore.AddReg
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+
+[HushCore_Install.NT.Services]
+AddService=HushCoreAudio,0x00000002,HushCore.Service
+
+[HushCore.Service]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\HushCoreAudio.sys
+
+[HushCore_Install.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,"WaveRender",HushCore.Interface.Render
+AddInterface=%KSCATEGORY_RENDER%,"WaveRender",HushCore.Interface.Render
+AddInterface=%KSCATEGORY_REALTIME%,"WaveRender",HushCore.Interface.Render
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyRender",HushCore.Interface.Render
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyRender",HushCore.Interface.Render
+AddInterface=%KSCATEGORY_AUDIO%,"WaveCapture",HushCore.Interface.Capture
+AddInterface=%KSCATEGORY_CAPTURE%,"WaveCapture",HushCore.Interface.Capture
+AddInterface=%KSCATEGORY_REALTIME%,"WaveCapture",HushCore.Interface.Capture
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyCapture",HushCore.Interface.Capture
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyCapture",HushCore.Interface.Capture
+
+[HushCore.Interface.Render]
+AddReg=HushCore.Interface.Render.AddReg
+
+[HushCore.Interface.Capture]
+AddReg=HushCore.Interface.Capture.AddReg
+
+[HushCore.Interface.Render.AddReg]
+HKR,,FriendlyName,,%RenderEndpointName%
+
+[HushCore.Interface.Capture.AddReg]
+HKR,,FriendlyName,,%CaptureEndpointName%
+
+; The topology bridge pins carry these GUIDs as their Name. PortCls reports the endpoint
+; name from this key, so Windows shows "HushCore Sink (HushCore Virtual Audio)" and
+; "HushCore Microphone (HushCore Virtual Audio)".
+[HushCore.AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Control\MediaCategories\{802BEB5D-5857-4C68-8C96-268A90F9998C}",Name,0x00000000,%RenderEndpointName%
+HKLM,"SYSTEM\CurrentControlSet\Control\MediaCategories\{9A2675BE-EFCE-4CEC-BC09-93CDBC806495}",Name,0x00000000,%CaptureEndpointName%
+
+[DestinationDirs]
+HushCore.CopyDriver=13
+
+[HushCore.CopyDriver]
+HushCoreAudio.sys
+
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+HushCoreAudio.sys=1
+
+[Strings]
+ProviderName="A.C.B"
+MfgName="HushCore"
+DeviceDesc="HushCore Virtual Audio"
+ServiceName="HushCore Virtual Audio Service"
+DiskName="HushCore Virtual Audio Installation Disk"
+RenderEndpointName="HushCore Sink"
+CaptureEndpointName="HushCore Microphone"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
