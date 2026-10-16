@@ -16,8 +16,20 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
-# Application configuration & local database files
+# Runtime data: settings, user presets and atomic-write temp files
 backend/settings.json
+backend/user_presets.json
+backend/.tmp-*.json
+
+# Dashboard build output. run.bat and `npm run build` regenerate it (frontend/vite.config.js outDir).
+backend/static/
+
+# Test coverage and editor folders
+.coverage
+htmlcov/
+coverage/
+.vscode/
+.idea/
 
 # Operating System specific files
 .DS_Store

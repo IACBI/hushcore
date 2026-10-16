@@ -1,0 +1,6 @@
+# Optional HQ AI noise suppression (DeepFilterNet). run.bat --ai installs these.
+# To avoid CUDA builds, install the CPU-only PyTorch wheels first:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0
+torchaudio>=2.0
+deepfilternet>=0.5
