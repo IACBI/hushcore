@@ -78,6 +78,9 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='ARM64'">
     <Inf2CatWindowsVersionList>10_RS3_ARM64</Inf2CatWindowsVersionList>
+    <!-- ApiValidator's analyzer (aitstatic) is an x86 tool that cannot load ARM64 binaries on
+         x64 build hosts (exit 193). The x64 build validates the same source. -->
+    <ApiValidator_Enable>false</ApiValidator_Enable>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
