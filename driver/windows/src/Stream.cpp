@@ -185,6 +185,7 @@ STDMETHODIMP_(NTSTATUS) HushStream::AllocateAudioBuffer(_In_ ULONG RequestedSize
 STDMETHODIMP_(void) HushStream::FreeAudioBuffer(_In_opt_ PMDL AudioBufferMdl, _In_ ULONG BufferSize)
 {
     UNREFERENCED_PARAMETER(BufferSize);
+    UNREFERENCED_PARAMETER(AudioBufferMdl); // only read by NT_ASSERT, which Release compiles out
     // PortCls only hands back the MDL this stream returned from AllocateAudioBuffer. Free the
     // stream's own buffer either way, so a mismatch can never leak it.
     NT_ASSERT(AudioBufferMdl == m_Mdl);
@@ -319,7 +320,7 @@ NTSTATUS HushStream::StartRun()
 VOID HushStream::StopTimer()
 {
     if (m_Timer != nullptr) {
-        ExDeleteTimer(m_Timer, TRUE, TRUE);
+        ExDeleteTimer(m_Timer, TRUE, TRUE, nullptr);
         m_Timer = nullptr;
     }
 }

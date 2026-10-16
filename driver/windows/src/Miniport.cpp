@@ -39,13 +39,6 @@ KSDATARANGE g_TopologyDataRange = {
 PKSDATARANGE g_WavePinRanges[] = { &g_WaveDataRange.DataRange };
 PKSDATARANGE g_TopologyPinRanges[] = { &g_TopologyDataRange };
 
-KSPIN_INTERFACE g_WavePinInterfaces[] = {
-    { STATIC_KSINTERFACE_STANDARD_LOOPED_STREAMING, 0, 0 }
-};
-KSPIN_MEDIUM g_WavePinMediums[] = {
-    { STATIC_KSMEDIUM_STANDARD_DEVIO, 0, 0 }
-};
-
 // The fixed format that DataRangeIntersection returns and SetFormat-equivalent checks accept.
 KSDATAFORMAT_WAVEFORMATEXTENSIBLE g_FixedFormat = {
     { sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE), 0, 0, 0,
@@ -61,7 +54,7 @@ KSDATAFORMAT_WAVEFORMATEXTENSIBLE g_FixedFormat = {
 // Wave filters: pin 0 is the host streaming pin (one instance), pin 1 the bridge to topology.
 const PCPIN_DESCRIPTOR g_WaveRenderPins[] = {
     { 1, 1, 0, nullptr,
-      { 1, g_WavePinInterfaces, 1, g_WavePinMediums,
+      { 0, nullptr, 0, nullptr,
         1, g_WavePinRanges, KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_SINK,
         &KSCATEGORY_AUDIO, nullptr, 0 } },
     { 0, 0, 0, nullptr,
@@ -72,7 +65,7 @@ const PCPIN_DESCRIPTOR g_WaveRenderPins[] = {
 
 const PCPIN_DESCRIPTOR g_WaveCapturePins[] = {
     { 1, 1, 0, nullptr,
-      { 1, g_WavePinInterfaces, 1, g_WavePinMediums,
+      { 0, nullptr, 0, nullptr,
         1, g_WavePinRanges, KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK,
         &KSCATEGORY_AUDIO, nullptr, 0 } },
     { 0, 0, 0, nullptr,
@@ -125,7 +118,7 @@ const GUID g_TopologyCategories[] = {
 } // namespace
 
 PCFILTER_DESCRIPTOR g_WaveRenderDescriptor = {
-    PCFILTER_DESCRIPTOR_VERSION, nullptr,
+    0, nullptr,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_WaveRenderPins), g_WaveRenderPins,
     sizeof(PCNODE_DESCRIPTOR), 0, nullptr,
     SIZEOF_ARRAY(g_PinToPinOneWay), g_PinToPinOneWay,
@@ -133,7 +126,7 @@ PCFILTER_DESCRIPTOR g_WaveRenderDescriptor = {
 };
 
 PCFILTER_DESCRIPTOR g_WaveCaptureDescriptor = {
-    PCFILTER_DESCRIPTOR_VERSION, nullptr,
+    0, nullptr,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_WaveCapturePins), g_WaveCapturePins,
     sizeof(PCNODE_DESCRIPTOR), 0, nullptr,
     SIZEOF_ARRAY(g_WaveCaptureConnections), g_WaveCaptureConnections,
@@ -141,7 +134,7 @@ PCFILTER_DESCRIPTOR g_WaveCaptureDescriptor = {
 };
 
 PCFILTER_DESCRIPTOR g_TopologyRenderDescriptor = {
-    PCFILTER_DESCRIPTOR_VERSION, nullptr,
+    0, nullptr,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_TopologyRenderPins), g_TopologyRenderPins,
     sizeof(PCNODE_DESCRIPTOR), 0, nullptr,
     SIZEOF_ARRAY(g_PinToPinOneWay), g_PinToPinOneWay,
@@ -149,7 +142,7 @@ PCFILTER_DESCRIPTOR g_TopologyRenderDescriptor = {
 };
 
 PCFILTER_DESCRIPTOR g_TopologyCaptureDescriptor = {
-    PCFILTER_DESCRIPTOR_VERSION, nullptr,
+    0, nullptr,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_TopologyCapturePins), g_TopologyCapturePins,
     sizeof(PCNODE_DESCRIPTOR), 0, nullptr,
     SIZEOF_ARRAY(g_PinToPinOneWay), g_PinToPinOneWay,
@@ -161,9 +154,6 @@ BOOLEAN HushIsFixedFormat(_In_ PKSDATAFORMAT DataFormat, _In_ ULONG Size)
     if (DataFormat == nullptr || Size < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE)) {
         return FALSE;
     }
-
-    const KSDATAFORMAT_WAVEFORMATEXTENSIBLE* format =
-        reinterpret_cast<const KSDATAFORMAT_WAVEFORMATEXTENSIBLE*>(DataFormat);
 
     // Validate a private copy: the caller's header can change after the check.
     KSDATAFORMAT_WAVEFORMATEXTENSIBLE format;

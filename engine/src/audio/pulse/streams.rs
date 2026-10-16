@@ -122,8 +122,8 @@ fn capture_loop(job: CaptureJob) {
 /// Copies `dst.len()` frames starting at frame `offset` of `bytes` into `dst`.
 fn decode(bytes: &[u8], offset: usize, dst: &mut [f32]) {
     let start = offset * 4;
-    for (sample, raw) in dst.iter_mut().zip(bytes[start..].chunks_exact(4)) {
-        *sample = f32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    for (sample, raw) in dst.iter_mut().zip(bytes[start..].as_chunks::<4>().0) {
+        *sample = f32::from_ne_bytes(*raw);
     }
 }
 

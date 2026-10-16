@@ -596,7 +596,7 @@ static OSStatus DriverRemoveDeviceClient(AudioServerPlugInDriverRef inDriver, Au
 static void NotifyChanged(AudioServerPlugInHostRef host, AudioObjectID obj, AudioObjectPropertySelector selector)
 {
     AudioObjectPropertyAddress addr = {selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-    (void)(*host)->PropertiesChanged(host, obj, 1, &addr);
+    (void)host->PropertiesChanged(host, obj, 1, &addr);
 }
 
 /*
@@ -762,7 +762,7 @@ static OSStatus DriverSetPropertyData(AudioServerPlugInDriverRef inDriver, Audio
         return kAudioHardwareNoError;
     }
     /* The host calls PerformDeviceConfigurationChange once the change is accepted. */
-    return (*host)->RequestDeviceConfigurationChange(host, inObjectID, rate, NULL);
+    return host->RequestDeviceConfigurationChange(host, inObjectID, rate, NULL);
 }
 
 /* ---- IO control and clock --------------------------------------------- */

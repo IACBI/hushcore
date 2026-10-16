@@ -15,6 +15,21 @@ extern "C" NTSTATUS HushStartDevice(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP 
 #pragma alloc_text(PAGE, HushAddDevice)
 #pragma alloc_text(PAGE, HushStartDevice)
 
+void __cdecl operator delete(void* Pointer)
+{
+    if (Pointer != nullptr) {
+        ExFreePoolWithTag(Pointer, HUSH_POOLTAG);
+    }
+}
+
+void __cdecl operator delete(void* Pointer, size_t Size)
+{
+    UNREFERENCED_PARAMETER(Size);
+    if (Pointer != nullptr) {
+        ExFreePoolWithTag(Pointer, HUSH_POOLTAG);
+    }
+}
+
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
     return PcInitializeAdapterDriver(DriverObject, RegistryPath, HushAddDevice);

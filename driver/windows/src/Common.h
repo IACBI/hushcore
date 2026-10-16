@@ -50,19 +50,9 @@ inline void* __cdecl operator new(size_t Size, ULONG64 PoolFlags, ULONG Tag)
     return ExAllocatePool2(PoolFlags, Size, Tag);
 }
 
-inline void __cdecl operator delete(void* Pointer)
-{
-    if (Pointer != nullptr) {
-        ExFreePoolWithTag(Pointer, HUSH_POOLTAG);
-    }
-}
-
-inline void __cdecl operator delete(void* Pointer, size_t)
-{
-    if (Pointer != nullptr) {
-        ExFreePoolWithTag(Pointer, HUSH_POOLTAG);
-    }
-}
+// Replacement deletes may not be inline (C4595); they are defined in Adapter.cpp.
+void __cdecl operator delete(void* Pointer);
+void __cdecl operator delete(void* Pointer, size_t Size);
 
 inline void __cdecl operator delete(void* Pointer, ULONG64, ULONG)
 {

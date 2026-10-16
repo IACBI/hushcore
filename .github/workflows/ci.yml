@@ -142,6 +142,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
+      - name: Show the WDK InfVerif target (diagnostics)
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\build\*\WindowsDriver.common.targets" | ForEach-Object {
+            Select-String -Path $_.FullName -Pattern 'InfVerif' | Select-Object -First 30 | ForEach-Object { $_.ToString() }
+          }
+
       - name: InfVerif
         shell: pwsh
         run: |

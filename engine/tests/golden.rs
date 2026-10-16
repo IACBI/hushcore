@@ -20,7 +20,7 @@ fn read_f32(name: &str) -> Vec<f32> {
     let path = golden_dir().join(name);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     assert_eq!(bytes.len() % 4, 0, "{name} is not a whole number of f32 samples");
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 fn manifest() -> Value {
