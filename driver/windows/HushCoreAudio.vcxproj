@@ -113,7 +113,4 @@
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <!-- The WDK's build-time InfVerif task cannot load its DLL on hosted runners. This later
-       definition replaces it; CI runs infverif.exe on the staged package instead. -->
-  <Target Name="InfVerif" />
 </Project>
