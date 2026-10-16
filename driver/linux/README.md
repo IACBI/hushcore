@@ -18,7 +18,8 @@ pair are never duplicated. `virtual-device` reports `provider`: `pipewire`, `pul
 
 ## Install and uninstall
 
-No root is needed. Run from the repository root:
+No root is needed. Run from the repository root, or from the extracted `hushcore-virtual-mic-<tag>-linux.zip`
+(it keeps the repository layout the scripts expect):
 
 ```sh
 scripts/linux/install-virtual-mic.sh     # installs the config and verifies both devices appear
@@ -64,13 +65,14 @@ privacy settings first. This was not tested in a sandbox; see below.
 
 ## Verified and not verified
 
-Verified in the Docker harness (`bash tools/linux-docker/run.sh`, Ubuntu 24.04, PipeWire 1.0.5,
-WirePlumber 0.4.17, pipewire-pulse 1.0.5, no sound hardware):
+Verified in the Docker harness (`bash tools/linux-docker/run.sh`, Ubuntu 24.04 packages for PipeWire,
+WirePlumber and pipewire-pulse, no sound hardware):
 
 - engine start on the default output creates the pair on demand; recording `HushCore Microphone`
   gives -15.1 dBFS RMS and 439.9 Hz for a 440 Hz tone at 0.5 peak amplitude fed to the fake mic
-- steady state after the first second: 0 xruns over 61 status events
-- started latency 8.6 to 11 ms; engine CPU about 0.5 % mean, 0.8 % max
+- steady state in the streaming check: no xruns. A 10 s `selftest` records 2 to 3 underruns per run
+  under Docker scheduling (see [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md))
+- started latency 8.6 to 11 ms; engine CPU 0.5 to 0.6 % average
 - reconnect: unloading the input gives `reconnecting`, and the engine streams again 0.4 s after
   the input returns
 - persistent PipeWire config: `virtual-device` exits 0 with provider `pipewire`, no duplicate
@@ -80,7 +82,7 @@ WirePlumber 0.4.17, pipewire-pulse 1.0.5, no sound hardware):
 
 Not verified:
 
-- the PulseAudio branch of the install and uninstall scripts and `hushcore.pa` (no PulseAudio
+- the PulseAudio branch of the install and uninstall scripts and `hushcore-virtual-mic.pa` (no PulseAudio
   server in the container; pipewire-pulse only)
 - the systemd restart path (the container has no systemd user session)
 - a real microphone, real unplug, suspend and resume, or Bluetooth devices

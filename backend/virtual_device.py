@@ -11,7 +11,8 @@ SINK_NAME = "HushCore Sink"
 MICROPHONE_NAME = "HushCore Microphone"
 
 _INSTALL_COMMANDS = {
-    "windows": r"powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1",
+    # Releases ship a test-signed driver until it is attestation-signed (docs/SIGNING.md).
+    "windows": r"powershell -ExecutionPolicy Bypass -File scripts\windows\install-driver.ps1 -AllowTestSigned",
     "macos": "sudo scripts/macos/install-plugin.sh",
     "linux": "scripts/linux/install-virtual-mic.sh",
 }

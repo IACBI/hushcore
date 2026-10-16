@@ -54,3 +54,17 @@ packages (deb/rpm) are signed by the repository that publishes them.
 
 On Windows, sign `hushcore-engine.exe` with the same code-signing certificate (Authenticode,
 `signtool sign /fd sha256 /tr <timestamp-url> /td sha256`) so SmartScreen does not warn.
+
+## Current release state
+
+The release workflow (`.github/workflows/release.yml`) builds and labels the artifacts; it does not
+sign them. The state of each artifact in the current release:
+
+| Artifact | Signing state |
+| --- | --- |
+| `hushcore-engine-<tag>-windows-x64.zip`, `-macos-universal.zip`, `-linux-x64.zip` | not signed; not notarized |
+| `hushcore-driver-<tag>-windows-testsigned.zip` | test-signed; needs test signing on the machine and `-AllowTestSigned`; attestation signing still to do |
+| `hushcore-plugin-<tag>-macos-adhoc.zip` | ad-hoc signed; needs Developer ID signing and notarization |
+| `hushcore-virtual-mic-<tag>-linux.zip` | plain text files; no signature |
+
+Because the engine binaries are not notarized, macOS may refuse to run a downloaded copy.

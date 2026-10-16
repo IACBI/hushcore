@@ -1,6 +1,6 @@
 [package]
 name = "hushcore-engine"
-version = "0.0.2"
+version = "0.0.99"
 edition = "2021"
 description = "Native low-latency audio engine for HushCore (WASAPI, Core Audio, PulseAudio/PipeWire)"
 license = "MIT"
